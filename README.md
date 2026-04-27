@@ -189,7 +189,7 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | Workspace Path | Path | Yes | `/mnt/user/appdata/openclaw/workspace` | Agent files, memory, projects |
 | Projects Path | Path | No | `/mnt/user/appdata/openclaw/projects` | Additional coding projects (advanced) |
 | Homebrew Path | Path | No | `/mnt/user/appdata/openclaw/homebrew` | Persistent Homebrew packages |
-| Logs Path | Path | No | `/mnt/user/appdata/openclaw/logs` | Gateway log files (mounted to `/var/log/openclaw` in the container, kept out of the overlay fs) |
+| Logs Path | Path | No | `/mnt/user/appdata/openclaw/logs` | Gateway log files (mounted to `/tmp/openclaw` — openclaw runtime always writes there, see [issue #61295](https://github.com/openclaw/openclaw/issues/61295)) |
 | **Required** |
 | Gateway Token | Variable | Yes | — | Secret for API/UI access |
 | Allowed Origins | Variable | Yes | — | Comma-separated browser origins. See [section above](#allowed-origins-required-since-openclaw-20262) |
@@ -214,8 +214,7 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | **Advanced** |
 | Gateway Port | Variable | No | `18789` | Override if 18789 is taken |
 | Disable Device Auth | Variable | No | `true` | LAN-friendly default; set `false` if you front the UI with HTTPS |
-| Log Max File Bytes | Variable | No | `26214400` | 25 MB per log file before rotation |
-| Log Max Files | Variable | No | `5` | Rotated archives kept beside the active log |
+| Log Max File Bytes | Variable | No | `26214400` | 25 MB per log file before rotation. Archive count is hardcoded to 5 by openclaw. |
 | PATH | Variable | No | (auto-set) | System PATH including Homebrew |
 | Web Search API Key | Variable | No | — | Brave Search API |
 
@@ -227,22 +226,22 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | `/home/node/clawd` | `/mnt/user/appdata/openclaw/workspace` | Agent workspace |
 | `/projects` | `/mnt/user/appdata/openclaw/projects` | Optional coding projects |
 | `/home/linuxbrew/.linuxbrew` | `/mnt/user/appdata/openclaw/homebrew` | Homebrew packages |
-| `/var/log/openclaw` | `/mnt/user/appdata/openclaw/logs` | Gateway log files (rotated by openclaw, default cap ~150 MB) |
+| `/tmp/openclaw` | `/mnt/user/appdata/openclaw/logs` | Gateway log files (rotated by openclaw, default cap ~150 MB) |
 
 ### Logs
 
-Gateway logs are routed to `/var/log/openclaw/openclaw.log` inside the container, mapped to `/mnt/user/appdata/openclaw/logs` on the host. This keeps them out of the container's overlay fs, so they don't bloat the docker layer.
+OpenClaw runtime always writes logs to `/tmp/openclaw/openclaw-YYYY-MM-DD.log` (the `logging.file` config option is currently ignored — see [openclaw issue #61295](https://github.com/openclaw/openclaw/issues/61295)). The template mounts `/tmp/openclaw` to `/mnt/user/appdata/openclaw/logs` on the host so they stay off the container overlay fs.
 
-Built-in rotation: when the active log hits `Log Max File Bytes` (default 25 MB), openclaw renames it to `openclaw.1.log` and starts fresh. Up to `Log Max Files` (default 5) archives are kept. Total disk cap = `(N+1) * size` ≈ 150 MB at defaults.
+Built-in rotation: when the active log hits `Log Max File Bytes` (default 25 MB), openclaw renames it to `openclaw-YYYY-MM-DD.1.log` and starts fresh. 5 numbered archives are kept (count is hardcoded in openclaw). Total disk cap ≈ `6 * Log Max File Bytes` = ~150 MB at defaults.
 
 To tail live:
 ```bash
-tail -f /mnt/user/appdata/openclaw/logs/openclaw.log
+tail -f /mnt/user/appdata/openclaw/logs/openclaw-*.log
 ```
 
 To purge:
 ```bash
-rm /mnt/user/appdata/openclaw/logs/openclaw*.log
+rm /mnt/user/appdata/openclaw/logs/openclaw-*.log
 docker restart OpenClaw
 ```
 

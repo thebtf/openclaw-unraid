@@ -12,7 +12,7 @@
 
 set -e
 
-mkdir -p /root/.openclaw /home/linuxbrew /var/log/openclaw
+mkdir -p /root/.openclaw /home/linuxbrew /tmp/openclaw
 CFG=/root/.openclaw/openclaw.json
 
 # --- Validate required env ---
@@ -98,13 +98,13 @@ BATCH="$BATCH,{\"path\":\"gateway.controlUi.dangerouslyDisableDeviceAuth\",\"val
 BATCH="$BATCH,{\"path\":\"gateway.controlUi.allowedOrigins\",\"value\":[$ORIGINS_JSON]}"
 BATCH="$BATCH,{\"path\":\"gateway.auth.mode\",\"value\":\"token\"}"
 
-# Route logs to a mounted volume so they don't bloat the container's overlay fs.
-# Cap each file at 25 MB and keep 5 archives -> max ~150 MB total on the host.
+# Note: openclaw logs always go to /tmp/openclaw/openclaw-YYYY-MM-DD.log -- logging.file
+# is currently ignored by the runtime (https://github.com/openclaw/openclaw/issues/61295).
+# So we mount /tmp/openclaw directly to a host volume instead of trying to relocate via config.
+# Built-in rotation: 100 MB per file, 5 numbered archives kept = ~600 MB cap.
+# logging.maxFileBytes is the only documented size knob; logging.maxFiles is NOT in the schema.
 LOG_MAX_BYTES="${OPENCLAW_LOG_MAX_FILE_BYTES:-26214400}"
-LOG_MAX_FILES="${OPENCLAW_LOG_MAX_FILES:-5}"
-BATCH="$BATCH,{\"path\":\"logging.file\",\"value\":\"/var/log/openclaw/openclaw.log\"}"
 BATCH="$BATCH,{\"path\":\"logging.maxFileBytes\",\"value\":$LOG_MAX_BYTES}"
-BATCH="$BATCH,{\"path\":\"logging.maxFiles\",\"value\":$LOG_MAX_FILES}"
 
 if [ -n "$CUSTOM_LLM_BASE_URL" ]; then
   BASE_URL=$(echo "$CUSTOM_LLM_BASE_URL" | sed 's:/*$::')
@@ -125,6 +125,6 @@ if ! node dist/index.js config set --batch-json "$BATCH"; then
   exit 1
 fi
 
-echo "[bootstrap] config applied: origins=[$ORIGINS_JSON], disableDeviceAuth=$DISABLE_DEVICE_AUTH${CUSTOM_LLM_BASE_URL:+, custom LLM=$BASE_URL ($API_TYPE), models=[$CUSTOM_LLM_MODEL_ID]}"
+echo "[bootstrap] config applied: origins=[$ORIGINS_JSON], disableDeviceAuth=$DISABLE_DEVICE_AUTH, logMaxBytes=$LOG_MAX_BYTES${CUSTOM_LLM_BASE_URL:+, custom LLM=$BASE_URL ($API_TYPE), models=[$CUSTOM_LLM_MODEL_ID]}"
 
 exec node dist/index.js gateway --bind lan
