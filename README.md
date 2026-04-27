@@ -90,7 +90,7 @@ OpenClaw defaults to Anthropic's Claude. **If you use a different provider, chan
 3. Fill in **all required fields**:
    - **Gateway Token** — `openssl rand -hex 24` or any secret value
    - **Allowed Origins** — `http://YOUR-UNRAID-IP:18789` (use your Unraid IP and the Control UI Port). Multiple values comma-separated, no spaces. **Required — gateway will refuse to start without this.**
-   - **LLM source** — one of: a built-in provider API key (Anthropic, OpenAI, etc.) **or** the Custom LLM trio (`Custom LLM Base URL`, `Custom LLM API Key`, `Custom LLM API Type`)
+   - **LLM source** — one of: a built-in provider API key (Anthropic, OpenAI, etc.) **or** the Custom LLM quartet (`Custom LLM Base URL`, `Custom LLM API Key`, `Custom LLM API Type`, `Custom LLM Model ID`)
 4. Click **Apply**
 
 ### Step 2: Open the Control UI
@@ -115,15 +115,18 @@ Control UI → **Config** → **Channels** — fill in Telegram/Discord/Slack/et
 
 ## Custom LLM Router (LiteLLM, vLLM, Ollama, etc.)
 
-If you run your own LLM router or local model server, set the three **Custom LLM** fields in the template instead of (or alongside) the built-in provider keys.
+If you run your own LLM router or local model server, set the four **Custom LLM** fields in the template instead of (or alongside) the built-in provider keys.
 
 | Field | Purpose | Example |
 |-------|---------|---------|
 | `Custom LLM Base URL` | Endpoint root | `http://192.168.1.50:11434/v1` (Ollama), `http://litellm:4000/v1`, `https://my-router.example.com/v1` |
 | `Custom LLM API Key` | Auth token | `ollama` (for local Ollama), your router token otherwise |
-| `Custom LLM API Type` | Protocol adapter | `openai-completions` (default, works for LiteLLM/vLLM/Ollama/OpenRouter), `openai-responses` (new OpenAI Responses API), `anthropic-messages` (Anthropic-compatible router) |
+| `Custom LLM API Type` | Protocol adapter (NOT the model name) | One of: `openai-completions` (default — LiteLLM/vLLM/Ollama/OpenRouter), `openai-responses`, `openai-codex-responses`, `anthropic-messages`, `google-generative-ai`, `github-copilot`, `bedrock-converse-stream`, `ollama`, `azure-openai-responses` |
+| `Custom LLM Model ID` | Model id(s) exposed by the endpoint | `gpt-5.5`, `llama-3.1-70b`, or multiple: `gpt-5.5,claude-3-opus` |
 
-When `Custom LLM Base URL` is set, the bootstrap writes a `models.providers.custom` block into `openclaw.json`:
+> **Common mistake:** `Custom LLM API Type` is the **protocol adapter**, not the model name. Putting a model name there fails openclaw's schema validation and the gateway refuses to start. Model name goes in `Custom LLM Model ID`.
+
+When `Custom LLM Base URL` is set, the bootstrap writes a `models.providers.custom` block into `openclaw.json` via the native `openclaw config set` CLI:
 
 ```json
 {
@@ -133,7 +136,10 @@ When `Custom LLM Base URL` is set, the bootstrap writes a `models.providers.cust
       "custom": {
         "baseUrl": "http://litellm:4000/v1",
         "apiKey": "${CUSTOM_LLM_API_KEY}",
-        "api": "openai-completions"
+        "api": "openai-completions",
+        "models": [
+          { "id": "gpt-5.5", "name": "gpt-5.5", "contextWindow": 128000, "maxTokens": 32000 }
+        ]
       }
     }
   }
@@ -189,7 +195,8 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | **Custom LLM (optional alternative to built-in keys)** |
 | Custom LLM Base URL | Variable | No | — | Endpoint root URL |
 | Custom LLM API Key | Variable | No | — | Token for the custom endpoint |
-| Custom LLM API Type | Variable | No | `openai-completions` | `openai-completions` / `openai-responses` / `anthropic-messages` |
+| Custom LLM API Type | Variable | No | `openai-completions` | Protocol adapter — see [list below](#custom-llm-router-litellm-vllm-ollama-etc) |
+| Custom LLM Model ID | Variable | No | — | Model id(s) exposed by the endpoint. Required if Custom LLM Base URL is set. Comma-separated for multiple. |
 | **Built-in LLM Providers** |
 | Anthropic API Key | Variable | No | — | Claude models |
 | OpenAI API Key | Variable | No | — | GPT models |
@@ -294,7 +301,7 @@ Your browser's origin is not in the `allowedOrigins` list.
    ```
    http://192.168.1.41:18789,http://openclaw.local:18789,https://openclaw.example.com
    ```
-3. Edit the template variable, click **Apply**, then delete `/mnt/user/appdata/openclaw/config/openclaw.json` so the bootstrap regenerates it. (Or edit the file directly and add the origin to the `allowedOrigins` array.)
+3. Edit the template variable, click **Apply**, then **restart** the container. The bootstrap is idempotent and will merge the new origins on the next start without touching your other config edits.
 
 ### `non-loopback Control UI requires gateway.controlUi.allowedOrigins`
 
@@ -316,6 +323,16 @@ cat /mnt/user/appdata/openclaw/config/openclaw.json
 
 You provided a non-Anthropic key but the default model is still `anthropic/claude-sonnet-4-5`. Change `agents.defaults.model.primary` to match your provider — see [Using Non-Anthropic Providers](#using-non-anthropic-providers-openai-gemini-groq-openrouter-xai-zai).
 
+### `Config invalid` / `models.providers.custom.api: Invalid option`
+
+You put a model name (e.g. `gpt-5.5`) in **Custom LLM API Type**. That field is the **protocol adapter** — see the [Custom LLM Router](#custom-llm-router-litellm-vllm-ollama-etc) section for valid values. The model name belongs in **Custom LLM Model ID**.
+
+Fix the template fields, click **Apply**, restart the container.
+
+### `models.providers.custom.models: Invalid input: expected array`
+
+Custom LLM endpoint declared but **Custom LLM Model ID** is empty. Set at least one model id (e.g. `gpt-5.5`).
+
 ### Container won't start / "Missing config" error
 
 Check logs first:
@@ -323,9 +340,13 @@ Check logs first:
 docker logs OpenClaw 2>&1 | tail -50
 ```
 
-If the bootstrap printed `FATAL: OPENCLAW_ALLOWED_ORIGINS is required`, fill in the **Allowed Origins** template field.
+The bootstrap prints `[bootstrap]` lines for every action. Common fatals:
+- `FATAL: OPENCLAW_ALLOWED_ORIGINS is required` — fill in the **Allowed Origins** template field.
+- `FATAL: CUSTOM_LLM_API_TYPE='...' is invalid` — see allowed adapter values above.
+- `FATAL: CUSTOM_LLM_MODEL_ID is required` — set at least one model id.
+- `FATAL: openclaw rejected the config update` — schema validation failed; the offending batch JSON is printed below the error.
 
-To force a fresh config:
+To force a fully fresh config (loses any UI edits):
 ```bash
 rm /mnt/user/appdata/openclaw/config/openclaw.json
 docker restart OpenClaw
@@ -389,11 +410,19 @@ docker run -d \
 
 ## How the bootstrap works
 
-The Unraid template runner strips `<` and `>` characters from `PostArgs` (a security measure to block shell redirects in the template UI). This breaks any inline shell script that uses comparisons (`<=`), redirects (`>`), or stderr (`>&2`).
+The bootstrap is **idempotent** — it re-runs on every container start and only updates the fields it owns (`gateway.controlUi.allowedOrigins` and `models.providers.custom`). Anything you edit through the Control UI (channels, agents, cron, tools) is preserved across restarts.
 
-To work around this, the bootstrap script lives at [`scripts/bootstrap.sh`](scripts/bootstrap.sh) and is embedded into `openclaw.xml` as a base64 blob. On container start the entrypoint (`/bin/sh -c "echo BASE64 | base64 -d | /bin/sh"`) decodes and executes it.
+It uses the native `openclaw config set --batch-json` CLI for the merge, so schema validation is performed by openclaw itself: invalid `CUSTOM_LLM_API_TYPE`, missing `CUSTOM_LLM_MODEL_ID`, malformed origins — all caught with a clear error before the gateway starts.
 
-If you fork this template and modify `scripts/bootstrap.sh`, regenerate the base64:
+### Why base64 in PostArgs?
+
+The Unraid template runner strips `<` and `>` characters from `PostArgs` as a defensive measure. This breaks any inline shell script that uses comparisons (`i<=NF`), redirects (`> file`), or stderr (`>&2`). Base64 alphabet has neither character, so the script survives unmodified.
+
+The actual bootstrap lives at [`scripts/bootstrap.sh`](scripts/bootstrap.sh). On container start the entrypoint runs `/bin/sh -c "echo BASE64 | base64 -d | /bin/sh"`, which decodes and executes it.
+
+### Modifying the bootstrap
+
+If you fork this template and edit `scripts/bootstrap.sh`, regenerate the base64:
 
 ```bash
 base64 -w0 scripts/bootstrap.sh
