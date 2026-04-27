@@ -7,10 +7,10 @@ services:
     hostname: OpenClaw
     restart: unless-stopped
     user: root
-    
+
     ports:
       - "18789:18789"
-    
+
     volumes:
       # Config and state (openclaw.json, sessions, credentials)
       - ./config:/root/.openclaw:rw
@@ -18,29 +18,56 @@ services:
       - ./workspace:/home/node/clawd:rw
       # Homebrew packages (persists brew/go/npm installs)
       - ./homebrew:/home/linuxbrew/.linuxbrew:rw
-    
+
     environment:
-      - TZ=${TZ:-America/Chicago}
+      - TZ=${TZ:-UTC}
+      # REQUIRED
       - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:?Gateway token required}
-      # LLM API Keys - set at least one
+      # REQUIRED since OpenClaw 2026.2: comma-separated browser origins for the Control UI.
+      # Example: http://192.168.1.41:18789  or  http://192.168.1.41:18789,http://openclaw.local:18789
+      - OPENCLAW_ALLOWED_ORIGINS=${OPENCLAW_ALLOWED_ORIGINS:?Allowed origins required (e.g. http://YOUR-IP:18789)}
+      # Custom LLM endpoint (optional) -- LiteLLM, vLLM, Ollama, OpenRouter proxy, etc.
+      - CUSTOM_LLM_BASE_URL=${CUSTOM_LLM_BASE_URL:-}
+      - CUSTOM_LLM_API_KEY=${CUSTOM_LLM_API_KEY:-}
+      - CUSTOM_LLM_API_TYPE=${CUSTOM_LLM_API_TYPE:-openai-completions}
+      # Built-in LLM providers (use one of these OR Custom LLM Base URL)
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - GROQ_API_KEY=${GROQ_API_KEY:-}
-      # Optional
+      - XAI_API_KEY=${XAI_API_KEY:-}
+      - ZAI_API_KEY=${ZAI_API_KEY:-}
+      # Optional channels
       - BRAVE_API_KEY=${BRAVE_API_KEY:-}
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       # System PATH including Homebrew
       - PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-    
-    command: >
-      sh -c "mkdir -p /root/.openclaw /home/linuxbrew;
-      [ -s /root/.openclaw/openclaw.json ] || echo '{\"gateway\":{\"mode\":\"local\",\"bind\":\"lan\",\"controlUi\":{\"allowInsecureAuth\":true},\"auth\":{\"mode\":\"token\"}}}' > /root/.openclaw/openclaw.json;
-      [ -x /home/linuxbrew/.linuxbrew/bin/brew ] || { echo Installing Homebrew... && NONINTERACTIVE=1 curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | bash; };
-      exec node dist/index.js gateway --bind lan"
-    
+
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /root/.openclaw /home/linuxbrew
+        CFG=/root/.openclaw/openclaw.json
+        if [ ! -s "$$CFG" ]; then
+          if [ -z "$$OPENCLAW_ALLOWED_ORIGINS" ]; then
+            echo "FATAL: OPENCLAW_ALLOWED_ORIGINS is required (e.g. http://192.168.1.41:18789)." >&2
+            exit 1
+          fi
+          ORIGINS_JSON=$$(echo "$$OPENCLAW_ALLOWED_ORIGINS" | awk -F, '{out=""; for(i=1;i<=NF;i++){gsub(/^[ \t]+|[ \t]+$$/,"",$$i); if($$i!=""){out=out (out?",":"") "\"" $$i "\""}} print out}')
+          LLM_BLOCK=""
+          if [ -n "$$CUSTOM_LLM_BASE_URL" ]; then
+            API_TYPE="$${CUSTOM_LLM_API_TYPE:-openai-completions}"
+            LLM_BLOCK=",\"models\":{\"mode\":\"merge\",\"providers\":{\"custom\":{\"baseUrl\":\"$$CUSTOM_LLM_BASE_URL\",\"apiKey\":\"\$${CUSTOM_LLM_API_KEY}\",\"api\":\"$$API_TYPE\"}}}"
+          fi
+          printf '%s' "{\"gateway\":{\"mode\":\"local\",\"bind\":\"lan\",\"controlUi\":{\"allowInsecureAuth\":true,\"allowedOrigins\":[$$ORIGINS_JSON]},\"auth\":{\"mode\":\"token\"}}$$LLM_BLOCK}" > "$$CFG"
+          echo "Wrote $$CFG"
+        fi
+        [ -x /home/linuxbrew/.linuxbrew/bin/brew ] || { echo "Installing Homebrew..."; NONINTERACTIVE=1 curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh | bash; }
+        exec node dist/index.js gateway --bind lan
+
     logging:
       driver: json-file
       options:
@@ -53,7 +80,11 @@ services:
 #
 # 1. Create .env file:
 #    OPENCLAW_GATEWAY_TOKEN=your-secret-token
-#    ANTHROPIC_API_KEY=sk-ant-...
+#    OPENCLAW_ALLOWED_ORIGINS=http://localhost:18789
+#    ANTHROPIC_API_KEY=sk-ant-...        # OR use a custom router below:
+#    # CUSTOM_LLM_BASE_URL=http://litellm:4000/v1
+#    # CUSTOM_LLM_API_KEY=sk-...
+#    # CUSTOM_LLM_API_TYPE=openai-completions
 #
 # 2. Start:
 #    docker compose up -d
@@ -61,7 +92,7 @@ services:
 # 3. Access Control UI:
 #    http://localhost:18789/?token=YOUR_TOKEN
 #
-# NOTE: First start takes ~60 seconds to install Homebrew for skills support.
-#       Subsequent starts are fast since Homebrew persists in the volume.
+# NOTE: First start takes ~60 seconds while Homebrew installs.
+#       Subsequent starts are fast (Homebrew persists in the volume).
 #
 # ==============================================================================
