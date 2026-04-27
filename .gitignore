@@ -1,0 +1,4 @@
+.serena/
+.agent/
+*.log
+.env

@@ -1,116 +1,73 @@
 # OpenClaw for Unraid
 
 [![Unraid](https://img.shields.io/badge/Unraid-CA%20Template-orange)](https://unraid.net/)
-[![OpenClaw](https://img.shields.io/badge/OpenClaw-v2026.1.29-blue)](https://github.com/openclaw/openclaw)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?logo=buymeacoffee)](https://buymeacoffee.com/jdhill777)
 
-Community Applications template for [OpenClaw](https://github.com/openclaw/openclaw) (formerly ClawdBot/MoltBot) — a powerful, self-hosted AI assistant that runs locally on your Unraid server.
+Community Applications template for [OpenClaw](https://github.com/openclaw/openclaw) — a self-hosted AI assistant gateway that runs locally on your Unraid server.
 
 ![OpenClaw Dashboard](screenshot.png)
 
-## 📑 Table of Contents
+## Table of Contents
 
-- [What is OpenClaw?](#-what-is-openclaw)
-- [Requirements](#-requirements)
-- [Quick Start](#-quick-start)
-- [Configuration](#️-configuration)
-- [Updating](#-updating)
-- [Troubleshooting](#-troubleshooting)
-- [Install Before CA Approval](#️-install-before-community-apps-approval)
-- [Resources](#-resources)
-- [License](#-license)
-- [Support the Maintainer](#-support-the-maintainer)
-- [Credits](#-credits)
+- [What is OpenClaw?](#what-is-openclaw)
+- [Requirements](#requirements)
+- [Quick Start](#quick-start)
+- [Custom LLM Router](#custom-llm-router-litellm-vllm-ollama-etc)
+- [Configuration](#configuration)
+- [Updating](#updating)
+- [Troubleshooting](#troubleshooting)
+- [Install Before CA Approval](#install-before-community-apps-approval)
+- [Resources](#resources)
+- [License](#license)
+- [Credits](#credits)
 
 ---
 
-## 🦞 What is OpenClaw?
+## What is OpenClaw?
 
-OpenClaw is a personal AI assistant you run on your own devices. It answers you on the channels you already use and keeps your data completely local.
+OpenClaw is a personal AI assistant you run on your own server. It answers you on the messaging channels you already use and keeps your data on your machine.
 
 ### Multi-Channel Messaging
-Connect to all your favorite platforms from one assistant:
-- 💬 **WhatsApp** — via WhatsApp Web/Baileys
-- ✈️ **Telegram** — Bot API with DMs + groups
-- 🎮 **Discord** — Full bot integration with guilds
-- 💼 **Slack** — Workspace integration via Bolt
-- 📧 **Google Chat** — Workspace chat support
-- 📱 **Signal** — Secure messaging
-- 🍎 **iMessage** — macOS integration
-- 🔷 **Microsoft Teams** — Enterprise chat
-- 🌐 **Matrix**, **Mattermost**, **BlueBubbles**, and more via plugins
+- WhatsApp, Telegram, Discord, Slack, Google Chat, Signal, iMessage, Microsoft Teams, Matrix, Mattermost, BlueBubbles — and more via plugins.
 
 ### Powerful Features
-- 🧠 **Multi-Agent Routing** — Route different channels/users to isolated agents with separate workspaces
-- 📁 **File Management** — Read, write, and organize files on your server
-- ⚡ **Shell Commands** — Execute scripts, manage Docker, automate anything
-- 🌐 **Browser Control** — Research, fetch data, interact with web pages
-- ⏰ **Cron Jobs** — Schedule tasks, reminders, and automated workflows
-- 🧩 **Skills System** — Extend capabilities with bundled or custom skills
-- 🎤 **Voice Wake + Talk Mode** — Always-on speech with ElevenLabs TTS
-- 📺 **Live Canvas** — Agent-driven visual workspace
-- 📱 **Mobile Nodes** — iOS and Android companion apps
-- 🖥️ **macOS Menu Bar App** — Quick access companion
+- Multi-Agent Routing — isolate channels/users with separate workspaces
+- File Management — read, write, organize files on your server
+- Shell Commands — execute scripts, manage Docker, automate anything
+- Browser Control — research, fetch data, interact with web pages
+- Cron Jobs — scheduled tasks, reminders, automated workflows
+- Skills System — extend capabilities with bundled or custom skills
+- Voice Wake + Talk Mode — always-on speech with TTS
+- Live Canvas — agent-driven visual workspace
+- Mobile Nodes — iOS and Android companion apps
 
 ### Your Data, Your Server
-Your files, workspace, and configuration stay **100% on your Unraid server**. Conversations are processed through your chosen LLM provider's API (Anthropic, OpenAI, etc.) but nothing is stored on third-party servers beyond their standard API processing. For fully local operation, you can use [Ollama](https://ollama.ai) with local models.
+Workspace and configuration stay 100% on your Unraid server. Conversations are processed through your chosen LLM provider's API. For fully local operation, point the **Custom LLM Base URL** at [Ollama](https://ollama.ai), [LiteLLM](https://github.com/BerriAI/litellm), or any OpenAI-compatible router running on your LAN.
 
-## 📋 Requirements
+## Requirements
 
-- Unraid 6.x or 7.x
-- Docker support enabled
-- API key from one of:
-  - [Anthropic](https://console.anthropic.com) (Claude) — **recommended**
-  - [OpenRouter](https://openrouter.ai) (100+ models)
-  - [OpenAI](https://platform.openai.com) (GPT models)
-  - [Google AI Studio](https://aistudio.google.com) (Gemini)
-  - [Groq](https://console.groq.com) (Fast Llama/Mixtral)
+- Unraid 6.x or 7.x with Docker enabled
+- A Gateway Token (any secret string — generate with `openssl rand -hex 24`)
+- Allowed Origins URL (e.g. `http://YOUR-UNRAID-IP:18789`) — see [why this is required](#allowed-origins-required-since-openclaw-20262)
+- One LLM source — either:
+  - An API key from a built-in provider (Anthropic, OpenAI, OpenRouter, Gemini, Groq, xAI, Z.AI), **or**
+  - A custom LLM endpoint URL (LiteLLM, vLLM, Ollama, your own router) — see [Custom LLM Router](#custom-llm-router-litellm-vllm-ollama-etc)
 
-### Getting an Anthropic API Key (Recommended)
+### Getting an Anthropic API Key
 
 1. Go to [console.anthropic.com](https://console.anthropic.com)
-2. Sign up or log in
-3. Add a payment method (Settings → Billing)
-4. Go to **API Keys** and create a new key
-5. Copy the key (starts with `sk-ant-`)
+2. Add a payment method (Settings → Billing)
+3. Open **API Keys**, create a new key (starts with `sk-ant-`)
 
-**Pricing:** Pay-as-you-go, starting at $5 credit. Most personal usage costs $5-20/month depending on how much you chat.
+> **Note:** API access requires console credits — it is separate from a Claude.ai Pro/Max chat subscription. Do **not** use `claude setup-token` / `CLAUDE_CODE_OAUTH_TOKEN` to drive OpenClaw — Anthropic prohibits using Claude Code subscription tokens with third-party tooling and your account can be suspended.
 
-> **Note:** This is separate from a Claude Pro subscription ($20/mo). Claude Pro is for the claude.ai web app — API access requires credits from the console. If you have Claude Pro or Max, see below for subscription-based auth.
+### Using Non-Anthropic Providers (OpenAI, Gemini, Groq, OpenRouter, xAI, Z.AI)
 
-### Using Claude Pro/Max Subscription (Alternative)
+OpenClaw defaults to Anthropic's Claude. **If you use a different provider, change the default model after install:**
 
-Already have a Claude Pro ($20/mo) or Max subscription? You can get a subscription-based token from Claude Code instead of buying API credits.
-
-**On your Mac or PC (not Unraid):**
-
-1. Make sure you have [Claude Code](https://claude.ai/code) installed and logged in with your Pro/Max account
-2. Run this command:
-   ```bash
-   claude setup-token
-   ```
-3. Follow the prompts — it will output a token (starts with `sk-ant-oat01-...`)
-4. Copy that token
-
-**On Unraid:**
-
-5. In the OpenClaw template, set the environment variable:
-   - **Name:** `CLAUDE_CODE_OAUTH_TOKEN`
-   - **Value:** (paste the token from step 3)
-
-That's it! OpenClaw will use your subscription instead of API credits.
-
-> **Tip:** The token expires periodically. If you get auth errors, run `claude setup-token` again to get a fresh token.
-
-### Using Non-Anthropic Providers (OpenAI, Gemini, Groq, OpenRouter)
-
-OpenClaw defaults to Anthropic's Claude model. **If you're using a different provider, you must change the default model after installation:**
-
-1. Install OpenClaw with your API key (e.g., `GEMINI_API_KEY`)
-2. Open the Control UI
-3. Go to **Config** tab
-4. Find `agents.defaults.model.primary` and change it to match your provider:
+1. Install OpenClaw with your API key (e.g. `GEMINI_API_KEY`)
+2. Open the Control UI → **Config** tab → **Agents** → **Raw JSON**
+3. Set `agents.defaults.model.primary` to match your provider:
 
 | Provider | Model Example |
 |----------|---------------|
@@ -120,195 +77,205 @@ OpenClaw defaults to Anthropic's Claude model. **If you're using a different pro
 | Groq | `groq/llama-3.1-70b-versatile` |
 | OpenRouter | `openrouter/anthropic/claude-3-sonnet` |
 
-5. Save the config and restart the container
+4. Save and restart the container.
 
-> **Why is this needed?** OpenClaw doesn't auto-detect which provider you're using from the API key. The default model is Anthropic — if you set a Gemini key but leave the default model, you'll get "No API key found for anthropic" errors.
+> **Why?** OpenClaw doesn't auto-detect the provider from the API key. If you set a Gemini key but leave the default model, you get `No API key found for provider "anthropic"` errors.
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Step 1: Install from Community Apps
 
 1. Search for **OpenClaw** in Community Applications
 2. Click **Install**
-3. Fill in the form:
-   - **Gateway Token**: Recommend generating with `openssl rand -hex 24`, but can be any value
-   - **LLM API Key**: Your Anthropic, OpenRouter, or other provider key
+3. Fill in **all required fields**:
+   - **Gateway Token** — `openssl rand -hex 24` or any secret value
+   - **Allowed Origins** — `http://YOUR-UNRAID-IP:18789` (use your Unraid IP and the Control UI Port). Multiple values comma-separated, no spaces. **Required — gateway will refuse to start without this.**
+   - **LLM source** — one of: a built-in provider API key (Anthropic, OpenAI, etc.) **or** the Custom LLM trio (`Custom LLM Base URL`, `Custom LLM API Key`, `Custom LLM API Type`)
 4. Click **Apply**
 
-That's it! The template automatically configures everything.
-
-### Step 2: Access the Control UI
-
-Open your browser to:
+### Step 2: Open the Control UI
 
 ```
 http://YOUR-UNRAID-IP:18789/?token=YOUR_GATEWAY_TOKEN
 ```
 
-**Important:** You must append `?token=YOUR_TOKEN` to the URL for authentication.
+The `?token=` parameter is mandatory. Example: `http://192.168.1.41:18789/?token=mySecretToken123`
 
-Example: `http://192.168.1.41:18789/?token=mySecretToken123`
+### Step 3: Pick the right model (post-install)
 
-## ⚙️ Configuration
+If you used a non-Anthropic provider or the Custom LLM endpoint:
+
+1. Control UI → **Config** tab → **Agents** sub-tab → **Raw JSON**
+2. Set `agents.defaults.model.primary` (see table above for built-in providers; for the custom router use `custom/<your-model-id>`)
+3. **Save** → restart the container
+
+### Step 4: (Optional) Connect a messaging channel
+
+Control UI → **Config** → **Channels** — fill in Telegram/Discord/Slack/etc. Or set the bot tokens in the template (Discord, Telegram) and configure pairing in the **Agents** tab on first message.
+
+## Custom LLM Router (LiteLLM, vLLM, Ollama, etc.)
+
+If you run your own LLM router or local model server, set the three **Custom LLM** fields in the template instead of (or alongside) the built-in provider keys.
+
+| Field | Purpose | Example |
+|-------|---------|---------|
+| `Custom LLM Base URL` | Endpoint root | `http://192.168.1.50:11434/v1` (Ollama), `http://litellm:4000/v1`, `https://my-router.example.com/v1` |
+| `Custom LLM API Key` | Auth token | `ollama` (for local Ollama), your router token otherwise |
+| `Custom LLM API Type` | Protocol adapter | `openai-completions` (default, works for LiteLLM/vLLM/Ollama/OpenRouter), `openai-responses` (new OpenAI Responses API), `anthropic-messages` (Anthropic-compatible router) |
+
+When `Custom LLM Base URL` is set, the bootstrap writes a `models.providers.custom` block into `openclaw.json`:
+
+```json
+{
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "custom": {
+        "baseUrl": "http://litellm:4000/v1",
+        "apiKey": "${CUSTOM_LLM_API_KEY}",
+        "api": "openai-completions"
+      }
+    }
+  }
+}
+```
+
+The `${CUSTOM_LLM_API_KEY}` reference is resolved at gateway start, so the key is never written in plaintext to the config file.
+
+### Pointing the agent at the custom provider
+
+After install, set the default model to use your custom provider:
+
+1. Control UI → **Config** → **Agents** → **Raw JSON**
+2. Add (or edit) the agents block:
+   ```json
+   {
+     "agents": {
+       "defaults": {
+         "model": { "primary": "custom/llama-3.1-70b" }
+       }
+     }
+   }
+   ```
+   Replace `llama-3.1-70b` with whatever model id your router exposes.
+3. Save → restart the container
+
+### Allowed Origins (required since OpenClaw 2026.2)
+
+Starting with OpenClaw `2026.2.x` the gateway refuses to start on non-loopback hosts unless `gateway.controlUi.allowedOrigins` is explicitly set. The template enforces this through the `OPENCLAW_ALLOWED_ORIGINS` variable.
+
+- **Single value:** `http://192.168.1.41:18789`
+- **Multiple values (comma-separated):** `http://192.168.1.41:18789,http://openclaw.local:18789`
+- **Reverse-proxy users:** add the proxied origin too — e.g. `http://192.168.1.41:18789,https://openclaw.example.com`
+
+The list must contain **full origins** (scheme + host + port). No wildcards, no trailing slashes.
+
+## Configuration
 
 ### Template Settings Reference
-
-This table documents all settings available in the Unraid template:
 
 | Setting | Type | Required | Default | Description |
 |---------|------|----------|---------|-------------|
 | **Ports** |
-| Control UI Port | Port | ✅ Yes | `18789` | Web UI and Gateway API port. Access at `http://IP:18789/?token=TOKEN` |
+| Control UI Port | Port | Yes | `18789` | Web UI and Gateway API port |
 | **Paths** |
-| Config Path | Path | ✅ Yes | `/mnt/user/appdata/openclaw/config` | OpenClaw configuration, sessions, and credentials |
-| Workspace Path | Path | ✅ Yes | `/mnt/user/appdata/openclaw/workspace` | Agent workspace for files, memory, and projects |
-| Projects Path | Path | ❌ Optional | `/mnt/user/appdata/openclaw/projects` | Additional path for coding projects (advanced) |
-| Homebrew Path | Path | ❌ Optional | `/mnt/user/appdata/openclaw/homebrew` | Persistent Homebrew packages. If you install Homebrew manually via console, this mount ensures it persists across restarts. |
-| **Authentication** |
-| Gateway Token | Variable | ✅ Yes | — | Secret token for API/UI access. Generate: `openssl rand -hex 24` |
-| **LLM Providers** (at least one required) |
-| Anthropic API Key | Variable | ⚡ Recommended | — | Claude models. Get from [console.anthropic.com](https://console.anthropic.com) |
-| OpenRouter API Key | Variable | ❌ Optional | — | 100+ models via single API. Get from [openrouter.ai](https://openrouter.ai) |
-| OpenAI API Key | Variable | ❌ Optional | — | GPT models. Get from [platform.openai.com](https://platform.openai.com) |
-| Gemini API Key | Variable | ❌ Optional | — | Google Gemini. Get from [aistudio.google.com](https://aistudio.google.com) |
-| Groq API Key | Variable | ❌ Optional | — | Fast Llama/Mixtral. Get from [console.groq.com](https://console.groq.com) |
-| xAI API Key | Variable | ❌ Optional | — | xAI Grok models. Get from [console.x.ai](https://console.x.ai) |
-| Z.AI API Key | Variable | ❌ Optional | — | Z.AI/Zhipu GLM models. Get from [z.ai/model-api](https://z.ai/model-api) |
+| Config Path | Path | Yes | `/mnt/user/appdata/openclaw/config` | Configuration, sessions, credentials |
+| Workspace Path | Path | Yes | `/mnt/user/appdata/openclaw/workspace` | Agent files, memory, projects |
+| Projects Path | Path | No | `/mnt/user/appdata/openclaw/projects` | Additional coding projects (advanced) |
+| Homebrew Path | Path | No | `/mnt/user/appdata/openclaw/homebrew` | Persistent Homebrew packages |
+| **Required** |
+| Gateway Token | Variable | Yes | — | Secret for API/UI access |
+| Allowed Origins | Variable | Yes | — | Comma-separated browser origins. See [section above](#allowed-origins-required-since-openclaw-20262) |
+| **Custom LLM (optional alternative to built-in keys)** |
+| Custom LLM Base URL | Variable | No | — | Endpoint root URL |
+| Custom LLM API Key | Variable | No | — | Token for the custom endpoint |
+| Custom LLM API Type | Variable | No | `openai-completions` | `openai-completions` / `openai-responses` / `anthropic-messages` |
+| **Built-in LLM Providers** |
+| Anthropic API Key | Variable | No | — | Claude models |
+| OpenAI API Key | Variable | No | — | GPT models |
+| OpenRouter API Key | Variable | No | — | 100+ models via single API |
+| Gemini API Key | Variable | No | — | Google Gemini |
+| Groq API Key | Variable | No | — | Fast Llama/Mixtral |
+| xAI API Key | Variable | No | — | Grok |
+| Z.AI API Key | Variable | No | — | Zhipu GLM |
 | **Subscription Auth** |
-| GitHub Copilot Token | Variable | ❌ Optional | — | (Advanced) GitHub Copilot OAuth token. See [Using Claude Pro/Max](#using-claude-promax-subscription-alternative) section. |
-| **Messaging Channels** (configure after install) |
-| Discord Bot Token | Variable | ❌ Optional | — | Discord bot integration. Can also configure via Control UI |
-| Telegram Bot Token | Variable | ❌ Optional | — | Telegram bot from [@BotFather](https://t.me/BotFather). Can also configure via Control UI |
+| GitHub Copilot Token | Variable | No | — | Advanced — see OpenClaw docs |
+| **Channels (configure after install)** |
+| Discord Bot Token | Variable | No | — | Discord integration |
+| Telegram Bot Token | Variable | No | — | Telegram bot from [@BotFather](https://t.me/BotFather) |
 | **Advanced** |
-| Gateway Port | Variable | ❌ Optional | `18789` | Override if port 18789 is in use |
-| PATH | Variable | ❌ Optional | (auto-set) | System PATH including Homebrew. Do not modify unless you know what you're doing. |
-| Web Search API Key | Variable | ❌ Optional | — | Brave Search API for web search (2000 free/month at [brave.com/search/api](https://brave.com/search/api)) |
+| Gateway Port | Variable | No | `18789` | Override if 18789 is taken |
+| PATH | Variable | No | (auto-set) | System PATH including Homebrew |
+| Web Search API Key | Variable | No | — | Brave Search API |
 
 ### Volume Mounts
 
 | Container Path | Host Path | Description |
 |----------------|-----------|-------------|
-| `/root/.openclaw` | `/mnt/user/appdata/openclaw/config` | Config file, sessions, credentials, WhatsApp auth |
-| `/home/node/clawd` | `/mnt/user/appdata/openclaw/workspace` | Agent workspace (files, memory, AGENTS.md, etc.) |
-| `/projects` | `/mnt/user/appdata/openclaw/projects` | Optional coding projects folder |
-| `/home/linuxbrew/.linuxbrew` | `/mnt/user/appdata/openclaw/homebrew` | Homebrew packages (persists brew/go/npm installs) |
+| `/root/.openclaw` | `/mnt/user/appdata/openclaw/config` | Config file, sessions, credentials |
+| `/home/node/clawd` | `/mnt/user/appdata/openclaw/workspace` | Agent workspace |
+| `/projects` | `/mnt/user/appdata/openclaw/projects` | Optional coding projects |
+| `/home/linuxbrew/.linuxbrew` | `/mnt/user/appdata/openclaw/homebrew` | Homebrew packages |
 
 ### Homebrew & Skills Support
 
-OpenClaw includes a [Skills system](https://docs.openclaw.ai/skills) that extends functionality with plugins. Some skills require tools like `go`, `npm`, or other brew-installable packages.
+Some skills require `go`, `npm`, or other brew-installable tools. Homebrew is **optional**.
 
-**How it works:**
-- Homebrew is **optional** — only install if you need skills that require brew/go/npm tools
-- To install, open the container console and run:
-  ```bash
-  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  ```
-- You can ignore the "Next steps" output — the template has already configured the PATH for you
-- Homebrew and installed packages persist in the `Homebrew Path` volume across restarts
-- We recommend reviewing the install script at [brew.sh](https://brew.sh) before running
-
-**Known limitation:** Skills that require Go (like `blogwatcher`, `blucli`) may timeout on first install while Go is being downloaded via Homebrew. This is due to OpenClaw's skill installer timeout. Simply click **Install** again and it will succeed since Go is now cached.
-
-### Config File Reference (`openclaw.json`)
-
-The main configuration file is stored at:
-```
-/mnt/user/appdata/openclaw/config/openclaw.json
+To install: open the container console and run:
+```bash
+NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
 
-Key configuration sections (see [full docs](https://docs.openclaw.ai/gateway/configuration)):
+Ignore the "Next steps" output — the template already configures `PATH`. Homebrew and packages persist in the `Homebrew Path` volume.
 
-| Section | Purpose | Example |
-|---------|---------|---------|
-| `gateway` | Core gateway settings | `{ "bind": "lan", "port": 18789 }` |
-| `gateway.auth` | Authentication mode | `{ "mode": "token" }` |
-| `gateway.controlUi` | Web UI settings | `{ "allowInsecureAuth": true }` |
-| `channels` | Messaging platform configs | Discord, Telegram, WhatsApp, Slack, etc. |
-| `channels.discord` | Discord bot settings | `{ "enabled": true, "token": "..." }` |
-| `channels.telegram` | Telegram bot settings | `{ "enabled": true, "botToken": "..." }` |
-| `channels.whatsapp` | WhatsApp Web settings | `{ "allowFrom": ["+1234567890"] }` |
-| `agents` | Agent configuration | Model selection, workspace, sandbox |
-| `agents.defaults.model` | Default LLM model | `{ "primary": "anthropic/claude-sonnet-4-5" }` |
-| `agents.defaults.workspace` | Agent workspace path | `"~/.openclaw/workspace"` |
-| `tools` | Tool permissions | Web search, browser, elevated access |
-| `cron` | Scheduled jobs | Reminders, automations, periodic tasks |
-| `messages` | Message handling | Prefixes, reactions, queue behavior |
+**Known limitation:** Skills that require Go (`blogwatcher`, `blucli`) may timeout on first install while Go downloads. Click **Install** again and it will succeed.
 
-**Minimal config (auto-created on first run):**
+### Config File Reference
+
+Main config: `/mnt/user/appdata/openclaw/config/openclaw.json`
+
+Bootstrap creates a minimal config on first start:
 ```json
 {
   "gateway": {
     "mode": "local",
     "bind": "lan",
-    "controlUi": { "allowInsecureAuth": true },
+    "controlUi": {
+      "allowInsecureAuth": true,
+      "allowedOrigins": ["http://YOUR-UNRAID-IP:18789"]
+    },
     "auth": { "mode": "token" }
   }
 }
 ```
 
-**Example with Discord + custom model:**
-```json
-{
-  "gateway": {
-    "mode": "local",
-    "bind": "lan",
-    "controlUi": { "allowInsecureAuth": true },
-    "auth": { "mode": "token" }
-  },
-  "channels": {
-    "discord": {
-      "enabled": true,
-      "token": "YOUR_DISCORD_BOT_TOKEN",
-      "dm": { "enabled": true, "policy": "allowlist", "allowFrom": ["YOUR_DISCORD_USER_ID"] },
-      "guilds": {
-        "YOUR_GUILD_ID": {
-          "channels": { "general": { "allow": true } }
-        }
-      }
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": { "primary": "anthropic/claude-sonnet-4-5" }
-    }
-  }
-}
-```
+If you set `Custom LLM Base URL`, the `models.providers.custom` block is added too.
 
-📚 **Full configuration reference:** [docs.openclaw.ai/gateway/configuration](https://docs.openclaw.ai/gateway/configuration)
+After first start, OpenClaw owns this file — edit via Control UI **Config** → **Raw JSON** to keep changes.
+
+> **Heads-up:** OpenClaw rewrites the config on its own writes (e.g. via the Control UI Save button), and serializes `${VAR}` references as plaintext. If you edit the file by hand and use env-var substitution, the next save through the UI may inline the resolved values.
+
+Full schema: [docs.openclaw.ai/gateway/configuration-reference](https://docs.openclaw.ai/gateway/configuration-reference)
 
 ### Connecting Messaging Channels
 
-After installation, configure channels via the Control UI **Config** page, or edit directly:
+After installation, configure channels via Control UI **Config** page or edit `openclaw.json` directly:
 
-```
-/mnt/user/appdata/openclaw/config/openclaw.json
-```
-
-Example adding Discord + Telegram:
 ```json
 {
-  "gateway": { ... },
   "channels": {
-    "discord": {
-      "enabled": true,
-      "token": "YOUR_DISCORD_BOT_TOKEN"
-    },
-    "telegram": {
-      "enabled": true,
-      "botToken": "YOUR_TELEGRAM_BOT_TOKEN"
-    }
+    "discord": { "enabled": true, "token": "${DISCORD_BOT_TOKEN}" },
+    "telegram": { "enabled": true, "botToken": "${TELEGRAM_BOT_TOKEN}" }
   }
 }
 ```
 
-📚 Full channel setup guides: [OpenClaw Docs - Channels](https://docs.openclaw.ai/channels)
+Full channel guides: [OpenClaw Docs — Channels](https://docs.openclaw.ai/channels)
 
-## 🔄 Updating
+## Updating
 
 **Via Unraid Docker UI:**
-1. Docker tab → Click OpenClaw icon → Check for Updates
-2. Apply update
+1. Docker tab → Click OpenClaw icon → Check for Updates → Apply
 
 **Via command line:**
 ```bash
@@ -316,69 +283,76 @@ docker pull ghcr.io/openclaw/openclaw:latest
 docker restart OpenClaw
 ```
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
-### "disconnected (1008): control ui requires HTTPS or localhost"
+### `origin not allowed (open the Control UI from the gateway host or allow it in gateway.controlUi.allowedOrigins)`
 
-Ensure you're accessing with your token:
+Your browser's origin is not in the `allowedOrigins` list.
+
+1. Confirm your **Allowed Origins** template field matches **exactly** the URL you opened — same scheme (`http`/`https`), host (IP or hostname), and port. `http://192.168.1.41:18789` ≠ `http://homelab:18789`.
+2. If you access from multiple hostnames (LAN IP + mDNS + reverse proxy), add **all** of them comma-separated:
+   ```
+   http://192.168.1.41:18789,http://openclaw.local:18789,https://openclaw.example.com
+   ```
+3. Edit the template variable, click **Apply**, then delete `/mnt/user/appdata/openclaw/config/openclaw.json` so the bootstrap regenerates it. (Or edit the file directly and add the origin to the `allowedOrigins` array.)
+
+### `non-loopback Control UI requires gateway.controlUi.allowedOrigins`
+
+The gateway refuses to start because no allowed origins were set. Set the **Allowed Origins** template field as described above, then restart.
+
+### `disconnected (1008): control ui requires HTTPS or localhost`
+
+Make sure you appended the token to the URL:
 ```
 http://YOUR-IP:18789/?token=YOUR_TOKEN
 ```
 
-If the error persists, verify the config file exists and contains `allowInsecureAuth`:
+If the error persists, verify the config file:
 ```bash
 cat /mnt/user/appdata/openclaw/config/openclaw.json
 ```
 
+### `No API key found for provider "anthropic"`
+
+You provided a non-Anthropic key but the default model is still `anthropic/claude-sonnet-4-5`. Change `agents.defaults.model.primary` to match your provider — see [Using Non-Anthropic Providers](#using-non-anthropic-providers-openai-gemini-groq-openrouter-xai-zai).
+
 ### Container won't start / "Missing config" error
 
-Manually create the config:
-```bash
-mkdir -p /mnt/user/appdata/openclaw/config
-echo '{"gateway":{"mode":"local","bind":"lan","controlUi":{"allowInsecureAuth":true},"auth":{"mode":"token"}}}' > /mnt/user/appdata/openclaw/config/openclaw.json
-docker restart OpenClaw
-```
-
-### Check logs for errors
+Check logs first:
 ```bash
 docker logs OpenClaw 2>&1 | tail -50
 ```
 
-## 🖥️ Install Before Community Apps Approval
+If the bootstrap printed `FATAL: OPENCLAW_ALLOWED_ORIGINS is required`, fill in the **Allowed Origins** template field.
 
-Not in CA yet? No problem — install via terminal in under a minute:
+To force a fresh config:
+```bash
+rm /mnt/user/appdata/openclaw/config/openclaw.json
+docker restart OpenClaw
+```
+
+## Install Before Community Apps Approval
+
+Not in CA yet? Install via terminal:
 
 **Step 1:** SSH into your Unraid server and run:
 ```bash
 curl -o /boot/config/plugins/dockerMan/templates-user/openclaw.xml \
-  https://raw.githubusercontent.com/jdhill777/openclaw-unraid/master/openclaw.xml
+  https://raw.githubusercontent.com/thebtf/openclaw-unraid/master/openclaw.xml
 ```
 
-**Step 2:** Refresh your browser on the Unraid Docker page
+**Step 2:** Refresh the Unraid Docker page
 
-**Step 3:** Go to **Docker** → **Add Container** → Select **OpenClaw** from the Template dropdown
+**Step 3:** **Docker** → **Add Container** → select **OpenClaw** from the Template dropdown
 
-**Step 4:** Fill in your settings:
-- **Gateway Token**: Any secret value (or generate with `openssl rand -hex 24`)
-- **Anthropic API Key**: Get from [console.anthropic.com](https://console.anthropic.com) (recommended)
-- Or use OpenRouter/OpenAI/Gemini/Groq instead
-
-**Step 5:** Click **Apply** — done!
-
-> **Note:** Homebrew is optional — see the [Homebrew & Skills Support](#homebrew--skills-support) section if you need it for certain skills.
+**Step 4:** Fill in the required fields (Gateway Token, Allowed Origins, one LLM source) and click **Apply**.
 
 <details>
 <summary><strong>Advanced: Manual Docker Run</strong></summary>
 
-For those who prefer the command line without using templates:
-
 ```bash
-# Create directories
-mkdir -p /mnt/user/appdata/openclaw/config
-mkdir -p /mnt/user/appdata/openclaw/workspace
-mkdir -p /mnt/user/appdata/openclaw/homebrew
+mkdir -p /mnt/user/appdata/openclaw/{config,workspace,homebrew}
 
-# Run container (replace YOUR_TOKEN and YOUR_API_KEY)
 docker run -d \
   --name OpenClaw \
   --network bridge \
@@ -390,45 +364,36 @@ docker run -d \
   -v /mnt/user/appdata/openclaw/workspace:/home/node/clawd:rw \
   -v /mnt/user/appdata/openclaw/homebrew:/home/linuxbrew/.linuxbrew:rw \
   -e OPENCLAW_GATEWAY_TOKEN=YOUR_TOKEN \
+  -e OPENCLAW_ALLOWED_ORIGINS=http://YOUR-UNRAID-IP:18789 \
   -e ANTHROPIC_API_KEY=sk-ant-YOUR_KEY \
   -e PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
   ghcr.io/openclaw/openclaw:latest \
-  sh -c "mkdir -p /root/.openclaw /home/linuxbrew; [ -s /root/.openclaw/openclaw.json ] || echo '{\"gateway\":{\"mode\":\"local\",\"bind\":\"lan\",\"controlUi\":{\"allowInsecureAuth\":true},\"auth\":{\"mode\":\"token\"}}}' > /root/.openclaw/openclaw.json; exec node dist/index.js gateway --bind lan"
+  sh -c '...bootstrap from openclaw.xml PostArgs...'
 ```
+
+(Copy the full `PostArgs` value from `openclaw.xml` for the final argument.)
 
 </details>
 
-## 📚 Resources
+## Resources
 
 - **Unraid Support Thread:** https://forums.unraid.net/topic/196865-support-openclaw-ai-personal-assistant/
-- **OpenClaw Website:** https://openclaw.ai
-- **Documentation:** https://docs.openclaw.ai
-- **GitHub:** https://github.com/openclaw/openclaw
-- **Discord Community:** https://discord.gg/clawd
-- **Getting Started Guide:** https://docs.openclaw.ai/start/getting-started
+- **OpenClaw Docs:** https://docs.openclaw.ai
+- **OpenClaw GitHub:** https://github.com/openclaw/openclaw
+- **OpenClaw Discord:** https://discord.gg/clawd
+- **Template Repo:** https://github.com/thebtf/openclaw-unraid
 
-## 📝 License
+## License
 
-This template is released under the [MIT License](LICENSE).
+[MIT](LICENSE). OpenClaw itself is MIT — see the [OpenClaw repository](https://github.com/openclaw/openclaw).
 
-OpenClaw is open-source under the MIT License — see the [OpenClaw repository](https://github.com/openclaw/openclaw).
-
-## ☕ Support the Maintainer
-
-If this template saved you time, consider buying me a coffee!
-
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-yellow?logo=buymeacoffee&style=for-the-badge)](https://buymeacoffee.com/jdhill777)
-
-*Note: I maintain the Unraid template — for the OpenClaw project itself, see their [GitHub Sponsors](https://github.com/sponsors/openclaw).*
-
-## 🙏 Credits
+## Credits
 
 - **OpenClaw Team** — Peter Steinberger ([@steipete](https://twitter.com/steipete)) and contributors
-- **Template Author** — [@jdhill777](https://github.com/jdhill777)
+- **Original CA template** — [@jdhill777](https://github.com/jdhill777)
+- **This fork** — [@thebtf](https://github.com/thebtf)
 - **Tested on** — Unraid 7.x
 
 ---
-
-🦞 *"EXFOLIATE! EXFOLIATE!" — A space lobster, probably*
 
 **Questions?** Open an issue or join the [OpenClaw Discord](https://discord.gg/clawd).
