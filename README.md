@@ -387,6 +387,20 @@ docker run -d \
 
 [MIT](LICENSE). OpenClaw itself is MIT — see the [OpenClaw repository](https://github.com/openclaw/openclaw).
 
+## How the bootstrap works
+
+The Unraid template runner strips `<` and `>` characters from `PostArgs` (a security measure to block shell redirects in the template UI). This breaks any inline shell script that uses comparisons (`<=`), redirects (`>`), or stderr (`>&2`).
+
+To work around this, the bootstrap script lives at [`scripts/bootstrap.sh`](scripts/bootstrap.sh) and is embedded into `openclaw.xml` as a base64 blob. On container start the entrypoint (`/bin/sh -c "echo BASE64 | base64 -d | /bin/sh"`) decodes and executes it.
+
+If you fork this template and modify `scripts/bootstrap.sh`, regenerate the base64:
+
+```bash
+base64 -w0 scripts/bootstrap.sh
+```
+
+Replace the long string between `echo ` and ` | base64 -d` in `openclaw.xml` with the new value.
+
 ## Credits
 
 - **OpenClaw Team** — Peter Steinberger ([@steipete](https://twitter.com/steipete)) and contributors
