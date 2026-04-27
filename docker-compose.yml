@@ -18,8 +18,10 @@ services:
       - ./workspace:/home/node/clawd:rw
       # Homebrew packages (persists brew/go/npm installs)
       - ./homebrew:/home/linuxbrew/.linuxbrew:rw
-      # Gateway logs (kept out of the container overlay fs)
-      - ./logs:/var/log/openclaw:rw
+      # Gateway logs (kept out of the container overlay fs).
+      # OpenClaw always writes to /tmp/openclaw regardless of logging.file (see issue #61295),
+      # so we mount /tmp/openclaw directly.
+      - ./logs:/tmp/openclaw:rw
       # Bootstrap script (idempotent merge via `openclaw config set`)
       - ./scripts/bootstrap.sh:/usr/local/lib/openclaw-bootstrap.sh:ro
 
@@ -37,9 +39,8 @@ services:
       - CUSTOM_LLM_MODEL_ID=${CUSTOM_LLM_MODEL_ID:-}
       # Control UI device-auth toggle (default true for LAN/homelab over plain HTTP)
       - OPENCLAW_DISABLE_DEVICE_AUTH=${OPENCLAW_DISABLE_DEVICE_AUTH:-true}
-      # Log rotation tuning
+      # Log rotation tuning (only maxFileBytes is in the schema; archive count is hardcoded to 5)
       - OPENCLAW_LOG_MAX_FILE_BYTES=${OPENCLAW_LOG_MAX_FILE_BYTES:-26214400}
-      - OPENCLAW_LOG_MAX_FILES=${OPENCLAW_LOG_MAX_FILES:-5}
       # Built-in LLM providers (use one of these OR Custom LLM Base URL)
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
