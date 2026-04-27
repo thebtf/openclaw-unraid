@@ -12,7 +12,7 @@
 
 set -e
 
-mkdir -p /root/.openclaw /home/linuxbrew
+mkdir -p /root/.openclaw /home/linuxbrew /var/log/openclaw
 CFG=/root/.openclaw/openclaw.json
 
 # --- Validate required env ---
@@ -37,6 +37,15 @@ if [ -n "$CUSTOM_LLM_BASE_URL" ]; then
     exit 1
   fi
 fi
+
+# Normalize boolean env (true/1/yes -> true, anything else -> false)
+to_bool() {
+  case "$1" in
+    1|true|TRUE|True|yes|YES|Yes|on|ON|On) echo "true" ;;
+    *) echo "false" ;;
+  esac
+}
+DISABLE_DEVICE_AUTH=$(to_bool "${OPENCLAW_DISABLE_DEVICE_AUTH:-true}")
 
 # --- Build comma-separated values into JSON arrays ---
 # CSV with whitespace and trailing-slash trimming, returns a comma-separated
@@ -85,8 +94,17 @@ BATCH='['
 BATCH="$BATCH{\"path\":\"gateway.mode\",\"value\":\"local\"}"
 BATCH="$BATCH,{\"path\":\"gateway.bind\",\"value\":\"lan\"}"
 BATCH="$BATCH,{\"path\":\"gateway.controlUi.allowInsecureAuth\",\"value\":true}"
+BATCH="$BATCH,{\"path\":\"gateway.controlUi.dangerouslyDisableDeviceAuth\",\"value\":$DISABLE_DEVICE_AUTH}"
 BATCH="$BATCH,{\"path\":\"gateway.controlUi.allowedOrigins\",\"value\":[$ORIGINS_JSON]}"
 BATCH="$BATCH,{\"path\":\"gateway.auth.mode\",\"value\":\"token\"}"
+
+# Route logs to a mounted volume so they don't bloat the container's overlay fs.
+# Cap each file at 25 MB and keep 5 archives -> max ~150 MB total on the host.
+LOG_MAX_BYTES="${OPENCLAW_LOG_MAX_FILE_BYTES:-26214400}"
+LOG_MAX_FILES="${OPENCLAW_LOG_MAX_FILES:-5}"
+BATCH="$BATCH,{\"path\":\"logging.file\",\"value\":\"/var/log/openclaw/openclaw.log\"}"
+BATCH="$BATCH,{\"path\":\"logging.maxFileBytes\",\"value\":$LOG_MAX_BYTES}"
+BATCH="$BATCH,{\"path\":\"logging.maxFiles\",\"value\":$LOG_MAX_FILES}"
 
 if [ -n "$CUSTOM_LLM_BASE_URL" ]; then
   BASE_URL=$(echo "$CUSTOM_LLM_BASE_URL" | sed 's:/*$::')
@@ -107,6 +125,6 @@ if ! node dist/index.js config set --batch-json "$BATCH"; then
   exit 1
 fi
 
-echo "[bootstrap] config applied: origins=[$ORIGINS_JSON]${CUSTOM_LLM_BASE_URL:+, custom LLM=$BASE_URL ($API_TYPE), models=[$CUSTOM_LLM_MODEL_ID]}"
+echo "[bootstrap] config applied: origins=[$ORIGINS_JSON], disableDeviceAuth=$DISABLE_DEVICE_AUTH${CUSTOM_LLM_BASE_URL:+, custom LLM=$BASE_URL ($API_TYPE), models=[$CUSTOM_LLM_MODEL_ID]}"
 
 exec node dist/index.js gateway --bind lan

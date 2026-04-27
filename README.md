@@ -189,6 +189,7 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | Workspace Path | Path | Yes | `/mnt/user/appdata/openclaw/workspace` | Agent files, memory, projects |
 | Projects Path | Path | No | `/mnt/user/appdata/openclaw/projects` | Additional coding projects (advanced) |
 | Homebrew Path | Path | No | `/mnt/user/appdata/openclaw/homebrew` | Persistent Homebrew packages |
+| Logs Path | Path | No | `/mnt/user/appdata/openclaw/logs` | Gateway log files (mounted to `/var/log/openclaw` in the container, kept out of the overlay fs) |
 | **Required** |
 | Gateway Token | Variable | Yes | — | Secret for API/UI access |
 | Allowed Origins | Variable | Yes | — | Comma-separated browser origins. See [section above](#allowed-origins-required-since-openclaw-20262) |
@@ -212,6 +213,9 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | Telegram Bot Token | Variable | No | — | Telegram bot from [@BotFather](https://t.me/BotFather) |
 | **Advanced** |
 | Gateway Port | Variable | No | `18789` | Override if 18789 is taken |
+| Disable Device Auth | Variable | No | `true` | LAN-friendly default; set `false` if you front the UI with HTTPS |
+| Log Max File Bytes | Variable | No | `26214400` | 25 MB per log file before rotation |
+| Log Max Files | Variable | No | `5` | Rotated archives kept beside the active log |
 | PATH | Variable | No | (auto-set) | System PATH including Homebrew |
 | Web Search API Key | Variable | No | — | Brave Search API |
 
@@ -223,6 +227,24 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | `/home/node/clawd` | `/mnt/user/appdata/openclaw/workspace` | Agent workspace |
 | `/projects` | `/mnt/user/appdata/openclaw/projects` | Optional coding projects |
 | `/home/linuxbrew/.linuxbrew` | `/mnt/user/appdata/openclaw/homebrew` | Homebrew packages |
+| `/var/log/openclaw` | `/mnt/user/appdata/openclaw/logs` | Gateway log files (rotated by openclaw, default cap ~150 MB) |
+
+### Logs
+
+Gateway logs are routed to `/var/log/openclaw/openclaw.log` inside the container, mapped to `/mnt/user/appdata/openclaw/logs` on the host. This keeps them out of the container's overlay fs, so they don't bloat the docker layer.
+
+Built-in rotation: when the active log hits `Log Max File Bytes` (default 25 MB), openclaw renames it to `openclaw.1.log` and starts fresh. Up to `Log Max Files` (default 5) archives are kept. Total disk cap = `(N+1) * size` ≈ 150 MB at defaults.
+
+To tail live:
+```bash
+tail -f /mnt/user/appdata/openclaw/logs/openclaw.log
+```
+
+To purge:
+```bash
+rm /mnt/user/appdata/openclaw/logs/openclaw*.log
+docker restart OpenClaw
+```
 
 ### Homebrew & Skills Support
 
@@ -306,6 +328,16 @@ Your browser's origin is not in the `allowedOrigins` list.
 ### `non-loopback Control UI requires gateway.controlUi.allowedOrigins`
 
 The gateway refuses to start because no allowed origins were set. Set the **Allowed Origins** template field as described above, then restart.
+
+### `control ui requires device identity (use HTTPS or localhost secure context)`
+
+Browsers require a secure context (HTTPS or `http://localhost`) to use the Web Crypto API that openclaw uses for device-identity signing. Plain HTTP on a LAN IP/hostname does not qualify.
+
+Two fixes:
+- **Use HTTPS** — front the container with a reverse proxy (Traefik, Caddy, NPM) and open `https://your-domain/?token=...`. Then set `OPENCLAW_DISABLE_DEVICE_AUTH=false` in the template for full device-identity protection.
+- **Disable device auth (default for this template)** — `OPENCLAW_DISABLE_DEVICE_AUTH=true` (default). Token auth still required. Acceptable for LAN-only / homelab use; not recommended over the open internet.
+
+The template default is `true` because most Unraid users access the Control UI over plain HTTP on the LAN. If your setup already gives you HTTPS, switch to `false`.
 
 ### `disconnected (1008): control ui requires HTTPS or localhost`
 
