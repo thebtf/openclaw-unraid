@@ -215,6 +215,7 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | Gateway Port | Variable | No | `18789` | Override if 18789 is taken |
 | Disable Device Auth | Variable | No | `true` | LAN-friendly default; set `false` if you front the UI with HTTPS |
 | Log Max File Bytes | Variable | No | `26214400` | 25 MB per log file before rotation. Archive count is hardcoded to 5 by openclaw. |
+| Skip Permission Fix | Variable | No | `0` | Set `1` to disable the generic permission fix (umask 0002 + setgid on dirs). Disable only if you manage permissions externally. |
 | PATH | Variable | No | (auto-set) | System PATH including Homebrew |
 | Web Search API Key | Variable | No | — | Brave Search API |
 
@@ -363,6 +364,26 @@ Fix the template fields, click **Apply**, restart the container.
 ### `models.providers.custom.models: Invalid input: expected array`
 
 Custom LLM endpoint declared but **Custom LLM Model ID** is empty. Set at least one model id (e.g. `gpt-5.5`).
+
+### Files in the appdata folder are invisible over SMB / NFS
+
+The container runs as root. Without intervention every file would land as `root:root 0600` and your SMB share user (e.g. Unraid's `nobody`) wouldn't see anything.
+
+The bootstrap applies a **generic** fix on every start: `umask 0002` and `chmod g+s` on the bind-mount directories. New files inherit group from the parent directory and get mode 0664. Old root-owned files get `chmod -R g+rwX` so they become group-readable/writable.
+
+The bootstrap does NOT touch ownership — that's a one-time host-side decision. Set the directory owner/group to whatever your share user expects:
+
+```bash
+# Unraid default (nobody:users):
+chown -R 99:100 /mnt/user/appdata/openclaw
+
+# Custom user/group (any UID/GID works):
+chown -R YOUR_UID:YOUR_GID /mnt/user/appdata/openclaw
+```
+
+Restart the container — new files written by openclaw inherit that group via the setgid bit.
+
+To opt out of the fix entirely (if you manage permissions externally), set **Skip Permission Fix** = `1` in the template.
 
 ### Container goes to STOP after the gateway restarts itself
 

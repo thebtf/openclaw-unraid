@@ -15,6 +15,33 @@ set -e
 mkdir -p /root/.openclaw /home/linuxbrew /tmp/openclaw
 CFG=/root/.openclaw/openclaw.json
 
+# --- Host-side visibility (generic: SMB on Unraid, NFS, etc.) ---
+# Container runs as root, so files written under bind-mounts would default to owner=root,
+# group=root, mode 0600 -- invisible/unwritable to the host user.
+#
+# Generic fix without hardcoding any UID/GID:
+#   1. umask 0002 -- new files default to 0664, dirs to 0775
+#   2. chmod g+s on dirs -- new files inherit GID from the parent directory (setgid bit)
+#   3. chmod -R g+rwX on existing files -- old root-owned files become group-readable/writable
+#
+# The bootstrap does NOT chown or chgrp -- the host owner/group is whatever you set on
+# /mnt/user/appdata/openclaw/* once. Whatever GID you put there is what new files inherit,
+# regardless of value. To preserve existing ownership, run on the host one-time:
+#   chown -R YOUR_HOST_UID:YOUR_HOST_GID /mnt/user/appdata/openclaw
+# (e.g. on Unraid: 99:100 = nobody:users by default; on other hosts use whatever you need.)
+#
+# Override: set OPENCLAW_SKIP_PERM_FIX=1 if you manage permissions externally and don't want
+# the bootstrap touching them.
+if [ "${OPENCLAW_SKIP_PERM_FIX:-0}" != "1" ]; then
+  umask 0002
+  for dir in /root/.openclaw /home/node/clawd /tmp/openclaw; do
+    [ -d "$dir" ] || continue
+    chmod -R g+rwX,o+rX "$dir" 2>/dev/null || true
+    find "$dir" -type d -exec chmod g+s {} + 2>/dev/null || true
+  done
+  echo "[bootstrap] applied generic perm fix: umask 0002 + setgid on dirs (host owner/group preserved)"
+fi
+
 # --- Validate required env ---
 if [ -z "$OPENCLAW_ALLOWED_ORIGINS" ]; then
   echo "[bootstrap] FATAL: OPENCLAW_ALLOWED_ORIGINS is required (e.g. http://192.168.1.41:18789)." 1>&2
