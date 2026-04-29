@@ -121,14 +121,18 @@ csv_to_json_strings() {
 }
 
 # CSV of model ids -> JSON array of model objects.
+# Context window and max output tokens are taken from env (with sensible defaults)
+# so users can match their actual model's real parameters.
 csv_to_model_objects() {
-  echo "$1" | awk -F, '{
+  CTX="${CUSTOM_LLM_CONTEXT_WINDOW:-128000}"
+  MAX="${CUSTOM_LLM_MAX_TOKENS:-32000}"
+  echo "$1" | awk -F, -v ctx="$CTX" -v maxtok="$MAX" '{
     out=""
     for (i=1; i<=NF; i++) {
       v=$i
       gsub(/^[ \t]+|[ \t]+$/, "", v)
       if (v != "") {
-        obj="{\"id\":\"" v "\",\"name\":\"" v "\",\"contextWindow\":128000,\"maxTokens\":32000}"
+        obj="{\"id\":\"" v "\",\"name\":\"" v "\",\"contextWindow\":" ctx ",\"maxTokens\":" maxtok "}"
         out = out (out ? "," : "") obj
       }
     }

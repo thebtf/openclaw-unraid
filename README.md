@@ -199,6 +199,8 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | Custom LLM API Key | Variable | No | — | Token for the custom endpoint |
 | Custom LLM API Type | Variable | No | `openai-completions` | Protocol adapter — see [list below](#custom-llm-router-litellm-vllm-ollama-etc) |
 | Custom LLM Model ID | Variable | No | — | Model id(s) exposed by the endpoint. Required if Custom LLM Base URL is set. Comma-separated for multiple. |
+| Custom LLM Context Window | Variable | No | `128000` | Total context window in tokens. Match your model's real value (gpt-4o=128k, claude-3-opus=200k, gpt-5=400k). |
+| Custom LLM Max Tokens | Variable | No | `32000` | Max output tokens per response. Match your model (gpt-4o=16384, claude-3-opus=4096, gpt-5=32000). |
 | **Built-in LLM Providers** |
 | Anthropic API Key | Variable | No | — | Claude models |
 | OpenAI API Key | Variable | No | — | GPT models |
