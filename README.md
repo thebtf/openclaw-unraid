@@ -443,6 +443,44 @@ rm /mnt/user/appdata/openclaw/config/openclaw.json
 docker restart OpenClaw
 ```
 
+### Restarting the gateway inside the container
+
+`openclaw gateway restart` (the upstream CLI) does **not** work inside this image. It assumes a host install with a systemd-user unit (`systemctl --user`); inside the container there is no systemd, so the CLI errors out with:
+
+```
+systemctl not available; systemd user services are required on Linux.
+```
+
+This is an upstream limitation tracked under [openclaw/openclaw#72224](https://github.com/openclaw/openclaw/issues/72224) ("fix gateway restart outside systemd"). Until that lands in a release, use one of the alternatives below.
+
+#### Three ways to restart, in order of how disruptive they are
+
+**1. Hot in-process restart via SIGUSR1** (fastest, no container downtime, picks up `openclaw.json` changes):
+
+```bash
+docker exec OpenClaw sh -c 'kill -USR1 $(pidof openclaw-gateway)'
+```
+
+This is the same path the gateway uses internally for hot-reload after a config save. Channels, plugins and skills re-initialize; existing requests in flight may drop. Documented as a first-class restart trigger in [`docs/cli/gateway.md`](https://github.com/openclaw/openclaw/blob/main/docs/cli/gateway.md) (`commands.restart: true` is the default, so authorization is on).
+
+**2. Container restart** (guaranteed clean state, ~10-15s downtime):
+
+- Unraid Web UI: **Docker** → click the OpenClaw icon → **Restart**, or
+- ```bash
+  docker restart OpenClaw
+  ```
+
+Use this when the gateway is wedged, after upgrading the image, or if SIGUSR1 didn't pick up your change.
+
+**3. Full bootstrap re-run** (only if the config file itself is broken):
+
+```bash
+rm /mnt/user/appdata/openclaw/config/openclaw.json
+docker restart OpenClaw
+```
+
+This drops UI-side edits — the bootstrap re-seeds everything from template env vars on next start. Use this as a last resort.
+
 ## Install Before Community Apps Approval
 
 Not in CA yet? Install via terminal:
