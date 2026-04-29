@@ -34,12 +34,17 @@ CFG=/root/.openclaw/openclaw.json
 # the bootstrap touching them.
 if [ "${OPENCLAW_SKIP_PERM_FIX:-0}" != "1" ]; then
   umask 0002
-  for dir in /root/.openclaw /home/node/clawd /tmp/openclaw; do
+  for dir in /root/.openclaw /home/node/clawd /tmp/openclaw /root/.local; do
     [ -d "$dir" ] || continue
+    # Align ownership of everything inside the mount with the mount-point itself.
+    # That way old root-owned leftovers (created by previous container starts before
+    # the perm fix existed) get rewritten to whatever the host put on the parent dir.
+    # No hardcoded UID/GID -- chown --reference reads from the live mount root.
+    chown -R --reference="$dir" "$dir" 2>/dev/null || true
     chmod -R g+rwX,o+rX "$dir" 2>/dev/null || true
     find "$dir" -type d -exec chmod g+s {} + 2>/dev/null || true
   done
-  echo "[bootstrap] applied generic perm fix: umask 0002 + setgid on dirs (host owner/group preserved)"
+  echo "[bootstrap] applied generic perm fix: chown --reference + umask 0002 + setgid on dirs"
 fi
 
 # --- Validate required env ---
