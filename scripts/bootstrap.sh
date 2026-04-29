@@ -127,4 +127,11 @@ fi
 
 echo "[bootstrap] config applied: origins=[$ORIGINS_JSON], disableDeviceAuth=$DISABLE_DEVICE_AUTH, logMaxBytes=$LOG_MAX_BYTES${CUSTOM_LLM_BASE_URL:+, custom LLM=$BASE_URL ($API_TYPE), models=[$CUSTOM_LLM_MODEL_ID]}"
 
-exec node dist/index.js gateway --bind lan
+# Run gateway. We do NOT use `exec` so that we can log the exit reason -- otherwise
+# the container disappears with no clue why. Docker's --restart=unless-stopped policy
+# (set in the template's ExtraParams) handles the actual restart on exit.
+echo "[bootstrap] starting gateway"
+node dist/index.js gateway --bind lan
+RC=$?
+echo "[bootstrap] gateway exited with rc=$RC -- container will be restarted by docker (unless stopped manually)"
+exit $RC
