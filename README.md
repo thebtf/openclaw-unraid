@@ -369,23 +369,38 @@ Custom LLM endpoint declared but **Custom LLM Model ID** is empty. Set at least 
 
 ### Files in the appdata folder are invisible over SMB / NFS
 
-The container runs as root. Without intervention every file would land as `root:root 0600` and your SMB share user (e.g. Unraid's `nobody`) wouldn't see anything.
+The container runs as root. Without intervention every new file would land as `root:root 0600` and your SMB share user wouldn't see anything.
 
-The bootstrap applies a **generic** fix on every start: `umask 0002` and `chmod g+s` on the bind-mount directories. New files inherit group from the parent directory and get mode 0664. Old root-owned files get `chmod -R g+rwX` so they become group-readable/writable.
+The bootstrap handles this in two stages on every container start:
 
-The bootstrap does NOT touch ownership — that's a one-time host-side decision. Set the directory owner/group to whatever your share user expects:
+1. **One-shot fix** — aligns ownership with the mount root and sets `umask 0002` + `chmod g+s` on directories so new files inherit the group.
+2. **Background owner-sync loop** — every `OPENCLAW_PERM_FIX_INTERVAL` seconds (default 5) re-runs `chown --reference` on the mount roots. Catches files openclaw rotates/writes at runtime (e.g. `openclaw.json.bak` after every UI Save).
+
+#### One-time host-side setup
+
+The bootstrap takes its UID/GID cue from the mount-point itself, so set ownership on the host **once** to whatever your SMB/NFS user expects. Find your UID/GID with `id $USER`, then:
 
 ```bash
-# Unraid default (nobody:users):
-chown -R 99:100 /mnt/user/appdata/openclaw
-
-# Custom user/group (any UID/GID works):
-chown -R YOUR_UID:YOUR_GID /mnt/user/appdata/openclaw
+# Replace 1026:100 with YOUR uid:gid (Unraid default is 99:100 = nobody:users)
+chown -R 1026:100 /mnt/user/appdata/openclaw
+chmod -R g+rwX,o+rX /mnt/user/appdata/openclaw
+find /mnt/user/appdata/openclaw -type d -exec chmod g+s {} +
 ```
 
-Restart the container — new files written by openclaw inherit that group via the setgid bit.
+This is identical to what the bootstrap does at start. Running it manually fixes existing files immediately without waiting for a restart. Restart the container afterwards (or wait `OPENCLAW_PERM_FIX_INTERVAL` seconds) so the runtime loop picks up the new ownership reference.
 
-To opt out of the fix entirely (if you manage permissions externally), set **Skip Permission Fix** = `1` in the template.
+#### Verify
+
+```bash
+ls -la /mnt/user/appdata/openclaw/config/
+```
+
+Directories should be `drwxrwsr-x ... 1026 100` (the `s` in group-execute is the setgid bit). Most files `-rw-rw-r-- ... 1026 100`. Note: **`openclaw.json` stays `-rw-------`** — openclaw deliberately writes it with mode 0600 because it contains the gateway token and provider api keys. Owner reads fine via SMB; other users by design can't.
+
+#### Tuning
+
+- `OPENCLAW_PERM_FIX_INTERVAL` — interval (seconds) for the runtime owner-sync loop. Default 5. Increase to 30+ on slow disks.
+- `OPENCLAW_SKIP_PERM_FIX=1` — disable both the one-shot fix and the background loop entirely. Use only if you manage permissions externally.
 
 ### Container goes to STOP after the gateway restarts itself
 
