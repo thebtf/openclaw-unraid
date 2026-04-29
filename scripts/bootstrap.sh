@@ -32,19 +32,42 @@ CFG=/root/.openclaw/openclaw.json
 #
 # Override: set OPENCLAW_SKIP_PERM_FIX=1 if you manage permissions externally and don't want
 # the bootstrap touching them.
+PERM_FIX_DIRS="/root/.openclaw /home/node/clawd /tmp/openclaw /root/.local"
+
 if [ "${OPENCLAW_SKIP_PERM_FIX:-0}" != "1" ]; then
   umask 0002
-  for dir in /root/.openclaw /home/node/clawd /tmp/openclaw /root/.local; do
+  for dir in $PERM_FIX_DIRS; do
     [ -d "$dir" ] || continue
     # Align ownership of everything inside the mount with the mount-point itself.
-    # That way old root-owned leftovers (created by previous container starts before
-    # the perm fix existed) get rewritten to whatever the host put on the parent dir.
-    # No hardcoded UID/GID -- chown --reference reads from the live mount root.
+    # No hardcoded UID/GID -- chown --reference reads from the live mount root,
+    # which the host has chowned once externally.
     chown -R --reference="$dir" "$dir" 2>/dev/null || true
     chmod -R g+rwX,o+rX "$dir" 2>/dev/null || true
     find "$dir" -type d -exec chmod g+s {} + 2>/dev/null || true
   done
   echo "[bootstrap] applied generic perm fix: chown --reference + umask 0002 + setgid on dirs"
+
+  # Runtime owner-sync loop. OpenClaw rotates openclaw.json -> .bak on every config
+  # save, and writes new session/canvas/memory files continuously. setgid on the
+  # parent dir makes new files inherit the GROUP, but the OWNER follows the
+  # writing process (root in our setup). Without runtime sync, fresh root-owned
+  # files keep appearing and SMB clients connected as the host owner can't read them.
+  #
+  # We re-run chown --reference every N seconds (default 5). File modes are left
+  # alone -- openclaw chooses 0600 for openclaw.json deliberately because it
+  # contains gateway tokens and api keys, and overriding that would leak secrets.
+  PERM_FIX_INTERVAL="${OPENCLAW_PERM_FIX_INTERVAL:-5}"
+  (
+    while true; do
+      for dir in $PERM_FIX_DIRS; do
+        [ -d "$dir" ] || continue
+        chown -R --reference="$dir" "$dir" 2>/dev/null || true
+      done
+      sleep "$PERM_FIX_INTERVAL"
+    done
+  ) &
+  SYNC_PID=$!
+  echo "[bootstrap] background owner-sync started (pid=$SYNC_PID, interval=${PERM_FIX_INTERVAL}s)"
 fi
 
 # --- Validate required env ---
