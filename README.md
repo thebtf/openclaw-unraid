@@ -381,8 +381,8 @@ The bootstrap handles this in two stages on every container start:
 The bootstrap takes its UID/GID cue from the mount-point itself, so set ownership on the host **once** to whatever your SMB/NFS user expects. Find your UID/GID with `id $USER`, then:
 
 ```bash
-# Replace 1026:100 with YOUR uid:gid (Unraid default is 99:100 = nobody:users)
-chown -R 1026:100 /mnt/user/appdata/openclaw
+# Replace YOUR_UID:YOUR_GID with your actual values (e.g. 99:100 = nobody:users)
+chown -R YOUR_UID:YOUR_GID /mnt/user/appdata/openclaw
 chmod -R g+rwX,o+rX /mnt/user/appdata/openclaw
 find /mnt/user/appdata/openclaw -type d -exec chmod g+s {} +
 ```
@@ -395,7 +395,7 @@ This is identical to what the bootstrap does at start. Running it manually fixes
 ls -la /mnt/user/appdata/openclaw/config/
 ```
 
-Directories should be `drwxrwsr-x ... 1026 100` (the `s` in group-execute is the setgid bit). Most files `-rw-rw-r-- ... 1026 100`. Note: **`openclaw.json` stays `-rw-------`** — openclaw deliberately writes it with mode 0600 because it contains the gateway token and provider api keys. Owner reads fine via SMB; other users by design can't.
+Directories should be `drwxrwsr-x` with your UID/GID (the `s` in group-execute is the setgid bit). Most files `-rw-rw-r--`. Note: **`openclaw.json` stays `-rw-------`** — openclaw deliberately writes it with mode 0600 because it contains the gateway token and provider api keys. Owner reads fine via SMB; other users by design can't.
 
 #### Tuning
 
