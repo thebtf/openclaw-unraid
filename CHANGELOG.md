@@ -7,11 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-04-29
+
+Theme: host-side visibility, persistent local tools, configurable LLM context limits, and full localization (Russian + Simplified Chinese).
+
 ### Added
 
 - Persistent `/root/.local` host mount (`Local Tools Path` → `/mnt/user/appdata/openclaw/local`) for `pip --user` installs and manually-built CLIs; survives container restarts.
 - `~/.local/bin` and `~/.cargo/bin` prepended to the template `PATH` so tools installed into the persistent mount are available immediately on next start.
 - Configurable context-window and max-output-token limits for custom LLM models via `CUSTOM_LLM_CONTEXT_WINDOW` (default `128000`) and `CUSTOM_LLM_MAX_TOKENS` (default `32000`) — previously hardcoded.
+- Russian translation: `README.ru.md` + `docs/MEMORY-SETUP.ru.md`.
+- Simplified Chinese translation: `README.zh.md` + `docs/MEMORY-SETUP.zh.md`.
+- Language switcher row at the top of every doc linking the three locales.
 
 ### Changed
 
@@ -33,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `docs/MEMORY-SETUP.md`: end-to-end guide for OpenClaw memory backends on Unraid (Builtin, QMD, Graphiti+FalkorDB, Cognee, Mem0) with pros/cons, setup, costs, and a Quirks section listing five known OpenClaw bugs hit during template development.
 - Added one-time `chown` commands and verification steps to README for users whose SMB shares showed permission errors; added the equivalent SMB/NFS visibility commands inline in the Unraid template `Overview` so they are visible without leaving the Add Container page.
 - Added `Container goes to STOP after the gateway restarts itself` troubleshooting entry covering the `--restart=unless-stopped` policy and how to apply it to existing containers via `docker update`.
+- Added this `CHANGELOG.md` (Keep a Changelog 1.1.0).
+- README freshness pass: documented `merge-template.py` in the Updating section, added the missing `Perm Fix Interval` row to the Settings Reference table, expanded PATH description, noted that `contextWindow`/`maxTokens` come from the new template fields.
 
 ## [1.0.0] — 2026-04-28
 
@@ -53,5 +62,6 @@ Initial public release of the Unraid CA template for OpenClaw, verified on Unrai
 
 - README with Quick Start, full Template Settings Reference table, Custom LLM Router walkthrough (LiteLLM / vLLM / Ollama / your own router), Configuration reference, Updating section, Troubleshooting, and pre-CA manual install instructions.
 
-[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/thebtf/openclaw-unraid/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/thebtf/openclaw-unraid/releases/tag/v1.0.0

@@ -2,3 +2,5 @@
 .agent/
 *.log
 .env
+
+scripts/__pycache__/
