@@ -90,7 +90,7 @@ OpenClaw defaults to Anthropic's Claude. **If you use a different provider, chan
 3. Fill in **all required fields**:
    - **Gateway Token** — `openssl rand -hex 24` or any secret value
    - **Allowed Origins** — `http://YOUR-UNRAID-IP:18789` (use your Unraid IP and the Control UI Port). Multiple values comma-separated, no spaces. **Required — gateway will refuse to start without this.**
-   - **LLM source** — one of: a built-in provider API key (Anthropic, OpenAI, etc.) **or** the Custom LLM quartet (`Custom LLM Base URL`, `Custom LLM API Key`, `Custom LLM API Type`, `Custom LLM Model ID`)
+   - **LLM source** — one of: a built-in provider API key (Anthropic, OpenAI, etc.) **or** a Custom LLM endpoint — see [Custom LLM Router](#custom-llm-router-litellm-vllm-ollama-etc) for the full set of fields
 4. Click **Apply**
 
 ### Step 2: Open the Control UI
@@ -147,6 +147,8 @@ When `Custom LLM Base URL` is set, the bootstrap writes a `models.providers.cust
 ```
 
 The `${CUSTOM_LLM_API_KEY}` reference is resolved at gateway start, so the key is never written in plaintext to the config file.
+
+> **Note:** `contextWindow` and `maxTokens` in the generated config come from the **Custom LLM Context Window** and **Custom LLM Max Tokens** template fields (defaults: `128000` / `32000`). Adjust those template fields to match your model — e.g., `gpt-4o`: 128000 / 16384; `claude-3-opus`: 200000 / 4096; `gpt-5.5`: 1050000 / 128000.
 
 ### Pointing the agent at the custom provider
 
@@ -219,7 +221,8 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | Disable Device Auth | Variable | No | `true` | LAN-friendly default; set `false` if you front the UI with HTTPS |
 | Log Max File Bytes | Variable | No | `26214400` | 25 MB per log file before rotation. Archive count is hardcoded to 5 by openclaw. |
 | Skip Permission Fix | Variable | No | `0` | Set `1` to disable the generic permission fix (umask 0002 + setgid on dirs). Disable only if you manage permissions externally. |
-| PATH | Variable | No | (auto-set) | System PATH including Homebrew |
+| Perm Fix Interval | Variable | No | `5` | Seconds between runtime owner-sync passes (`chown --reference` loop). Increase to 30+ on slow disks; set 0 to run once at startup only. |
+| PATH | Variable | No | (auto-set) | System PATH — includes `~/.local/bin`, `~/.cargo/bin`, Homebrew, Bun. See `openclaw.xml` `<Default>` for the full value. |
 | Web Search API Key | Variable | No | — | Brave Search API |
 
 ### Volume Mounts
@@ -315,6 +318,17 @@ Full channel guides: [OpenClaw Docs — Channels](https://docs.openclaw.ai/chann
 docker pull ghcr.io/openclaw/openclaw:latest
 docker restart OpenClaw
 ```
+
+**When the template itself has changed** (new env vars, updated PostArgs, restructured ExtraParams):
+
+```bash
+python3 scripts/merge-template.py \
+    --stored /boot/config/plugins/dockerMan/templates-user/my-OpenClaw.xml \
+    --upstream /boot/config/plugins/dockerMan/templates-user/openclaw.xml \
+    --output /boot/config/plugins/dockerMan/templates-user/my-OpenClaw.xml
+```
+
+The script overlays user-filled values from the stored template onto the upstream xml, writes a `.bak` of the original, and prints any new fields you should review in the Unraid Edit Container UI. Run this before clicking **Edit Container** so your tokens, API keys, and paths survive the upgrade while you pick up new template-level fields.
 
 ## Troubleshooting
 
