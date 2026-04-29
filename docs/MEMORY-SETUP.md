@@ -1,5 +1,7 @@
 # OpenClaw Memory Setup Guide
 
+**Languages:** [English](./MEMORY-SETUP.md) · [Русский](./MEMORY-SETUP.ru.md) · [中文](./MEMORY-SETUP.zh.md)
+
 OpenClaw ships with a builtin memory engine and supports several alternative backends. This guide covers all options with concrete setup steps for each, with a focus on Unraid homelab deployments.
 
 ## Table of Contents

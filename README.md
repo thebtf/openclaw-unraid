@@ -1,5 +1,7 @@
 # OpenClaw for Unraid
 
+**Languages:** [English](./README.md) · [Русский](./README.ru.md) · [中文](./README.zh.md)
+
 [![Unraid](https://img.shields.io/badge/Unraid-CA%20Template-orange)](https://unraid.net/)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
