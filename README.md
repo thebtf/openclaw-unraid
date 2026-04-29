@@ -189,6 +189,7 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | Workspace Path | Path | Yes | `/mnt/user/appdata/openclaw/workspace` | Agent files, memory, projects |
 | Projects Path | Path | No | `/mnt/user/appdata/openclaw/projects` | Additional coding projects (advanced) |
 | Homebrew Path | Path | No | `/mnt/user/appdata/openclaw/homebrew` | Persistent Homebrew packages |
+| Local Tools Path | Path | No | `/mnt/user/appdata/openclaw/local` | Persistent `~/.local` — pip `--user` installs, manually-built CLIs in `bin/`, libs in `lib/`. Survives restarts. |
 | Logs Path | Path | No | `/mnt/user/appdata/openclaw/logs` | Gateway log files (mounted to `/tmp/openclaw` — openclaw runtime always writes there, see [issue #61295](https://github.com/openclaw/openclaw/issues/61295)) |
 | **Required** |
 | Gateway Token | Variable | Yes | — | Secret for API/UI access |
@@ -227,6 +228,7 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | `/home/node/clawd` | `/mnt/user/appdata/openclaw/workspace` | Agent workspace |
 | `/projects` | `/mnt/user/appdata/openclaw/projects` | Optional coding projects |
 | `/home/linuxbrew/.linuxbrew` | `/mnt/user/appdata/openclaw/homebrew` | Homebrew packages |
+| `/root/.local` | `/mnt/user/appdata/openclaw/local` | `~/.local` — pip `--user`, manually-built CLIs (e.g. `~/.local/bin/obscura`), libs |
 | `/tmp/openclaw` | `/mnt/user/appdata/openclaw/logs` | Gateway log files (rotated by openclaw, default cap ~150 MB) |
 
 ### Logs

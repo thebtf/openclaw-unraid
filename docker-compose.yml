@@ -18,6 +18,8 @@ services:
       - ./workspace:/home/node/clawd:rw
       # Homebrew packages (persists brew/go/npm installs)
       - ./homebrew:/home/linuxbrew/.linuxbrew:rw
+      # ~/.local persistence: pip --user installs, manually-built CLIs in bin/, libs in lib/
+      - ./local:/root/.local:rw
       # Gateway logs (kept out of the container overlay fs).
       # OpenClaw always writes to /tmp/openclaw regardless of logging.file (see issue #61295),
       # so we mount /tmp/openclaw directly.
@@ -53,8 +55,8 @@ services:
       - BRAVE_API_KEY=${BRAVE_API_KEY:-}
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      # System PATH including Homebrew
-      - PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+      # System PATH including ~/.local/bin, Homebrew, Bun, Cargo
+      - PATH=/root/.local/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/root/.bun/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
     # Bootstrap script lives at scripts/bootstrap.sh -- mounted read-only into the container.
     # Idempotent: re-runs every start, merges managed fields via `openclaw config set`.
