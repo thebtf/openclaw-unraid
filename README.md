@@ -364,6 +364,26 @@ Fix the template fields, click **Apply**, restart the container.
 
 Custom LLM endpoint declared but **Custom LLM Model ID** is empty. Set at least one model id (e.g. `gpt-5.5`).
 
+### Container goes to STOP after the gateway restarts itself
+
+OpenClaw exits the gateway process when you save certain config changes via the Control UI (e.g. switching the default model). Without an explicit Docker restart policy the container stays stopped instead of cycling.
+
+This template sets `--restart=unless-stopped` in `ExtraParams` so docker auto-restarts after any non-manual exit. If you removed that flag or your existing container was created before it was added:
+
+```bash
+docker update --restart=unless-stopped OpenClaw
+```
+
+Or via Unraid Web UI: **Edit Container** → set **Restart Policy** to `Unless Stopped` → Apply.
+
+If the container still goes to STOP after a save, check the bootstrap exit message:
+
+```bash
+docker logs OpenClaw 2>&1 | grep "gateway exited"
+```
+
+`rc=0` means a clean exit (config reload) — restart policy should pick it up. `rc=1` or higher means an actual crash; share the surrounding log lines.
+
 ### Container won't start / "Missing config" error
 
 Check logs first:
@@ -427,6 +447,10 @@ docker run -d \
 
 </details>
 
+## Memory backends (QMD, Graphiti, FalkorDB, ...)
+
+Default builtin memory works fine for casual use. For better recall, knowledge graphs, or shared facts across multiple agents, see [`docs/MEMORY-SETUP.md`](docs/MEMORY-SETUP.md) — full setup guide for QMD (one-line upgrade), Graphiti + FalkorDB (graph memory), Cognee, and Mem0.
+
 ## Resources
 
 - **Unraid Support Thread:** https://forums.unraid.net/topic/196865-support-openclaw-ai-personal-assistant/
@@ -434,6 +458,7 @@ docker run -d \
 - **OpenClaw GitHub:** https://github.com/openclaw/openclaw
 - **OpenClaw Discord:** https://discord.gg/clawd
 - **Template Repo:** https://github.com/thebtf/openclaw-unraid
+- **Memory Setup Guide:** [`docs/MEMORY-SETUP.md`](docs/MEMORY-SETUP.md)
 
 ## License
 
