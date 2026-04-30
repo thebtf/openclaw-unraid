@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-04-30
+
+Theme: replace the `chown -R --reference` background loop with PUID/PGID + `setpriv`. Pin `agents.list` and `logging.file` so plugin auto-enable and instance namespacing don't silently override our config.
+
+### BREAKING (operational, not config)
+
+- `OPENCLAW_PERM_FIX_INTERVAL` env var is removed (no more runtime owner-sync loop).
+- `OPENCLAW_SKIP_PERM_FIX` env var is renamed to `OPENCLAW_SKIP_OWNERSHIP_INIT` (semantic shift: "skip the one-shot init", not "skip the loop").
+- `Log Max File Bytes` default raised from `26214400` (25 MB) to `104857600` (100 MB) to match OpenClaw upstream default.
+
+If you set the old env vars manually in your Unraid template, update them. The legacy field names are gone; the template provides the new ones via the standard upgrade path (Apply → re-add).
+
+### Added
+
+- `PUID` and `PGID` template fields (`Display="always"`, `Required="true"`, defaults `99/100` = `nobody:users` on Unraid). The bootstrap re-maps the in-image `node` user to `PUID:PGID` via `usermod -u -o` / `groupmod -g -o`, aligns mount-point ownership once if needed, then `setpriv --reuid --regid --init-groups` exec's the gateway under those IDs.
+- `Custom LLM Reasoning` template field (`Display="advanced"`, default `true`). Adds `reasoning: true` to `models.providers.custom.models[*].reasoning` so OpenClaw surfaces reasoning/thinking blocks for modern models (gpt-5.5, o1, claude-opus-4.7).
+- Bootstrap pins `agents.list = [{"id":"main","model":"custom/<first-model-id>"}]` whenever `Custom LLM Base URL` is set, so the gateway primary stays on `custom/<id>` and isn't silently swapped to `openai/<id>` by plugin auto-enable (e.g. when `openai-image` plugin auto-creates `models.providers.openai`).
+- Bootstrap pins `logging.file = "/tmp/openclaw/openclaw.log"` so logs land on the host volume regardless of OpenClaw 2026.4's instance namespacing (`/tmp/openclaw-0/` default since 2026.4).
+- Diagnostic CLI examples in README: `openclaw doctor`, `openclaw config validate`, `openclaw gateway stability --bundle latest --json`, `OPENCLAW_GATEWAY_STARTUP_TRACE=1` for phase-timing on startup.
+
+### Removed
+
+- Background owner-sync loop (`chown -R --reference` every 5 seconds). On installations with growing workspaces (>100k files / multi-GB trees) the recursive chown blocked the Node event loop for 30-140 seconds per tick, causing session-write-lock stalls, Telegram polling timeouts, and gateway thrashing.
+- `OPENCLAW_PERM_FIX_INTERVAL` env var (no longer applicable — no loop).
+- Reference to [openclaw issue #61295](https://github.com/openclaw/openclaw/issues/61295) (`logging.file` ignored). The issue is closed in 2026.4+; `logging.file` works again. Bootstrap now uses it explicitly.
+
+### Fixed
+
+- File ownership now flows naturally from `PUID:PGID` instead of being chased by a timer. Every file the gateway writes is created with the right ownership from inception (because the gateway runs as `PUID:PGID`).
+- `openclaw.json` is re-chowned to `PUID:PGID` after every `config set` (atomic-write pattern replaces the inode, otherwise fresh inode would inherit root because the bootstrap is still root at that point).
+- Logs are now reliably written to `/tmp/openclaw/openclaw.log` on the host volume. Previously the file logger sometimes wrote to `/tmp/openclaw-0/` (gateway-instance namespace) which wasn't mounted out.
+- Agent `primary` model no longer flips to `openai/<id>` when an OpenAI-namespace plugin auto-enables. Bootstrap pins `agents.list[0].model` to `custom/<first-model-id>` whenever a custom LLM is configured.
+
+### Documentation
+
+- README permissions section rewritten around PUID/PGID. Migration guidance for users coming from v1.1.0 (legacy `chown -R` loop is removed; first start under v1.1.1+ runs ONE recursive chown if ownership doesn't already match).
+- README Logs section: removed reference to issue #61295, added diagnostic CLI examples, mentioned `OPENCLAW_LOG_LEVEL=debug` and `OPENCLAW_GATEWAY_STARTUP_TRACE=1`.
+- Template Overview rewritten: SMB/NFS commands replaced with USER/GROUP (PUID/PGID) section explaining how to find host UID/GID and what the bootstrap does on first start.
+
 ## [1.1.0] — 2026-04-29
 
 Theme: host-side visibility, persistent local tools, configurable LLM context limits, and full localization (Russian + Simplified Chinese).
@@ -62,6 +101,7 @@ Initial public release of the Unraid CA template for OpenClaw, verified on Unrai
 
 - README with Quick Start, full Template Settings Reference table, Custom LLM Router walkthrough (LiteLLM / vLLM / Ollama / your own router), Configuration reference, Updating section, Troubleshooting, and pre-CA manual install instructions.
 
-[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/thebtf/openclaw-unraid/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/thebtf/openclaw-unraid/releases/tag/v1.0.0

@@ -194,8 +194,10 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | Projects Path | Path | No | `/mnt/user/appdata/openclaw/projects` | Additional coding projects (advanced) |
 | Homebrew Path | Path | No | `/mnt/user/appdata/openclaw/homebrew` | Persistent Homebrew packages |
 | Local Tools Path | Path | No | `/mnt/user/appdata/openclaw/local` | Persistent `~/.local` — pip `--user` installs, manually-built CLIs in `bin/`, libs in `lib/`. Survives restarts. |
-| Logs Path | Path | No | `/mnt/user/appdata/openclaw/logs` | Gateway log files (mounted to `/tmp/openclaw` — openclaw runtime always writes there, see [issue #61295](https://github.com/openclaw/openclaw/issues/61295)) |
+| Logs Path | Path | No | `/mnt/user/appdata/openclaw/logs` | Gateway log files. Bootstrap pins `logging.file=/tmp/openclaw/openclaw.log` to keep them on the host volume regardless of OpenClaw's instance namespacing (`/tmp/openclaw-0/` since 2026.4). |
 | **Required** |
+| PUID | Variable | Yes | `99` | Host user ID the gateway runs under. `99` = `nobody` on Unraid. Find yours: `id $USER` on Unraid console. |
+| PGID | Variable | Yes | `100` | Host group ID. `100` = `users` on Unraid. |
 | Gateway Token | Variable | Yes | — | Secret for API/UI access |
 | Allowed Origins | Variable | Yes | — | Comma-separated browser origins. See [section above](#allowed-origins-required-since-openclaw-20262) |
 | **Custom LLM (optional alternative to built-in keys)** |
@@ -221,9 +223,9 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | **Advanced** |
 | Gateway Port | Variable | No | `18789` | Override if 18789 is taken |
 | Disable Device Auth | Variable | No | `true` | LAN-friendly default; set `false` if you front the UI with HTTPS |
-| Log Max File Bytes | Variable | No | `26214400` | 25 MB per log file before rotation. Archive count is hardcoded to 5 by openclaw. |
-| Skip Permission Fix | Variable | No | `0` | Set `1` to disable the generic permission fix (umask 0002 + setgid on dirs). Disable only if you manage permissions externally. |
-| Perm Fix Interval | Variable | No | `5` | Seconds between runtime owner-sync passes (`chown --reference` loop). Increase to 30+ on slow disks; set 0 to run once at startup only. |
+| Log Max File Bytes | Variable | No | `104857600` | 100 MB per log file before rotation (matches OpenClaw upstream default). Archive count is hardcoded to 5 by openclaw. |
+| Skip Ownership Init | Variable | No | `0` | Set `1` to skip the one-shot ownership alignment at container start. Bootstrap normally aligns mount ownership to PUID:PGID once, then exec's the gateway under those IDs (no loops). Disable only if you manage ownership externally. |
+| Custom LLM Reasoning | Variable | No | `true` | Whether the custom LLM model(s) support reasoning/thinking blocks. Default `true` for modern models (gpt-5.5, o1, claude-opus-4.7). Set `false` for non-reasoning models. |
 | PATH | Variable | No | (auto-set) | System PATH — includes `~/.local/bin`, `~/.cargo/bin`, Homebrew, Bun. See `openclaw.xml` `<Default>` for the full value. |
 | Web Search API Key | Variable | No | — | Brave Search API |
 
@@ -238,20 +240,47 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | `/root/.local` | `/mnt/user/appdata/openclaw/local` | `~/.local` — pip `--user`, manually-built CLIs (e.g. `~/.local/bin/obscura`), libs |
 | `/tmp/openclaw` | `/mnt/user/appdata/openclaw/logs` | Gateway log files (rotated by openclaw, default cap ~150 MB) |
 
+### Permissions (PUID/PGID)
+
+The gateway runs under `PUID:PGID` (defaults `99:100` = `nobody:users` on Unraid). Files in your appdata mounts are owned by these IDs, so SMB/NFS clients see them with the right ownership automatically — no `chown` loops, no permission-fix daemons. The bootstrap aligns mount ownership to `PUID:PGID` once at container start (only when there's a mismatch), then `setpriv`'s the gateway down to those IDs.
+
+To use a different user, set PUID/PGID to your host user's ID:
+```bash
+id $USER
+# uid=1026(myname) gid=100(users) groups=...
+```
+Set `PUID=1026` and `PGID=100` in the template, Apply, and restart.
+
+If you upgraded from v1.1.0 or earlier (which ran the gateway as root and had a `chown -R --reference` background loop), the legacy loop is removed. Existing files keep their current ownership; the bootstrap will detect mismatch and align them once on first start.
+
 ### Logs
 
-OpenClaw runtime always writes logs to `/tmp/openclaw/openclaw-YYYY-MM-DD.log` (the `logging.file` config option is currently ignored — see [openclaw issue #61295](https://github.com/openclaw/openclaw/issues/61295)). The template mounts `/tmp/openclaw` to `/mnt/user/appdata/openclaw/logs` on the host so they stay off the container overlay fs.
+The bootstrap pins `logging.file=/tmp/openclaw/openclaw.log` so logs land on the host volume reliably. (OpenClaw 2026.4 namespaces by gateway instance — default path is `/tmp/openclaw-0/`, not `/tmp/openclaw/`. We pin it back to our mount.)
 
-Built-in rotation: when the active log hits `Log Max File Bytes` (default 25 MB), openclaw renames it to `openclaw-YYYY-MM-DD.1.log` and starts fresh. 5 numbered archives are kept (count is hardcoded in openclaw). Total disk cap ≈ `6 * Log Max File Bytes` = ~150 MB at defaults.
+Built-in rotation: when the active log hits `Log Max File Bytes` (default 100 MB, matches upstream), openclaw renames it to `openclaw.1.log` etc. 5 numbered archives are kept (count is hardcoded in openclaw). Total disk cap ≈ `6 * Log Max File Bytes` = ~600 MB at defaults.
 
 To tail live:
 ```bash
-tail -f /mnt/user/appdata/openclaw/logs/openclaw-*.log
+tail -f /mnt/user/appdata/openclaw/logs/openclaw.log
+```
+
+For verbose debugging:
+```bash
+docker exec -e OPENCLAW_LOG_LEVEL=debug -e OPENCLAW_GATEWAY_STARTUP_TRACE=1 OpenClaw \
+  sh -c 'cd /app && node dist/index.js gateway --bind lan 2>&1 | head -200'
+```
+
+Diagnostic CLI inside the container:
+```bash
+docker exec OpenClaw sh -c 'cd /app && node dist/index.js doctor'           # health check
+docker exec OpenClaw sh -c 'cd /app && node dist/index.js doctor --fix'     # auto-repair
+docker exec OpenClaw sh -c 'cd /app && node dist/index.js config validate'  # schema check
+docker exec OpenClaw sh -c 'cd /app && node dist/index.js gateway stability --bundle latest --json'  # last crash snapshot
 ```
 
 To purge:
 ```bash
-rm /mnt/user/appdata/openclaw/logs/openclaw-*.log
+rm /mnt/user/appdata/openclaw/logs/openclaw*.log
 docker restart OpenClaw
 ```
 
@@ -387,38 +416,39 @@ Custom LLM endpoint declared but **Custom LLM Model ID** is empty. Set at least 
 
 ### Files in the appdata folder are invisible over SMB / NFS
 
-The container runs as root. Without intervention every new file would land as `root:root 0600` and your SMB share user wouldn't see anything.
+Set `PUID`/`PGID` in the template to match your host user. The bootstrap then aligns mount ownership to those IDs once at start and exec's the gateway under them. New files are owned `PUID:PGID` from the start — no chown loops, no SMB/NFS visibility issues.
 
-The bootstrap handles this in two stages on every container start:
-
-1. **One-shot fix** — aligns ownership with the mount root and sets `umask 0002` + `chmod g+s` on directories so new files inherit the group.
-2. **Background owner-sync loop** — every `OPENCLAW_PERM_FIX_INTERVAL` seconds (default 5) re-runs `chown --reference` on the mount roots. Catches files openclaw rotates/writes at runtime (e.g. `openclaw.json.bak` after every UI Save).
-
-#### One-time host-side setup
-
-The bootstrap takes its UID/GID cue from the mount-point itself, so set ownership on the host **once** to whatever your SMB/NFS user expects. Find your UID/GID with `id $USER`, then:
-
+Find your UID/GID:
 ```bash
-# Replace YOUR_UID:YOUR_GID with your actual values (e.g. 99:100 = nobody:users)
-chown -R YOUR_UID:YOUR_GID /mnt/user/appdata/openclaw
-chmod -R g+rwX,o+rX /mnt/user/appdata/openclaw
-find /mnt/user/appdata/openclaw -type d -exec chmod g+s {} +
+id $USER
+# uid=1026(myname) gid=100(users) groups=100(users),...
 ```
 
-This is identical to what the bootstrap does at start. Running it manually fixes existing files immediately without waiting for a restart. Restart the container afterwards (or wait `OPENCLAW_PERM_FIX_INTERVAL` seconds) so the runtime loop picks up the new ownership reference.
+Set `PUID=1026`, `PGID=100` in the template, Apply, restart container.
+
+#### Migration from v1.1.0 or earlier
+
+Older versions ran the gateway as `root` and used a background `chown -R --reference` loop to nudge file ownership every 5 seconds. On installations with large workspaces (>100k files) the recursive chown blocked the Node event loop for tens of seconds, causing session-write-lock stalls and Telegram polling timeouts.
+
+v1.1.1+ removes the loop entirely. On first start under v1.1.1+:
+- Bootstrap detects mount-point ownership mismatch.
+- Runs ONE recursive chown to align with `PUID:PGID`.
+- Exec's the gateway under those IDs.
+- All future files inherit the right ownership naturally.
 
 #### Verify
 
 ```bash
+docker exec OpenClaw id
+# uid=1026(node) gid=100(users) groups=100(users)
 ls -la /mnt/user/appdata/openclaw/config/
 ```
 
-Directories should be `drwxrwsr-x` with your UID/GID (the `s` in group-execute is the setgid bit). Most files `-rw-rw-r--`. Note: **`openclaw.json` stays `-rw-------`** — openclaw deliberately writes it with mode 0600 because it contains the gateway token and provider api keys. Owner reads fine via SMB; other users by design can't.
+Files should be `1026:100`. **`openclaw.json` stays mode `-rw-------`** — openclaw writes it 0600 by design (gateway token + provider keys). Owner (you) reads it fine via SMB; other users by design can't.
 
-#### Tuning
+#### Override
 
-- `OPENCLAW_PERM_FIX_INTERVAL` — interval (seconds) for the runtime owner-sync loop. Default 5. Increase to 30+ on slow disks.
-- `OPENCLAW_SKIP_PERM_FIX=1` — disable both the one-shot fix and the background loop entirely. Use only if you manage permissions externally.
+- `OPENCLAW_SKIP_OWNERSHIP_INIT=1` — skip the one-shot ownership alignment. Use if you manage ownership externally (e.g. Unraid User Scripts).
 
 ### Container goes to STOP after the gateway restarts itself
 

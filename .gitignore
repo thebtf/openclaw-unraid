@@ -1,5 +1,6 @@
 .serena/
 .agent/
+.engram-project
 *.log
 .env
 

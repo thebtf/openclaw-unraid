@@ -2,72 +2,80 @@
 # OpenClaw Unraid template bootstrap.
 # Embedded into openclaw.xml as base64 to bypass Unraid's PostArgs '<' / '>' stripping.
 #
-# Idempotent: re-runs on every container start, merges managed fields
-# (controlUi.allowedOrigins, models.providers.custom) via the native
-# `openclaw config set --batch-json` command. Schema validation and merge
-# semantics are handled by openclaw itself, not by us.
+# Two-phase model:
+#   PHASE 1 (root): usermod/groupmod node to PUID/PGID, one-shot chown of writable
+#                   bind-mounts ONLY when ownership doesn't match, then `openclaw
+#                   config set --batch-json` to apply managed config fields.
+#   PHASE 2 (PUID): exec gateway via `setpriv --reuid --regid --init-groups`.
 #
-# User edits to other sections (channels, agents, cron, tools) made via
-# the Control UI are preserved.
+# No background loops, no recursive chown on a cron tick. Ownership is set ONCE
+# at startup, then enforced naturally because the gateway runs as PUID:PGID and
+# every file it creates inherits that ownership.
+#
+# User edits to non-managed sections (channels, agents, cron, tools) made via
+# the Control UI are preserved across restarts (idempotent merge).
 
 set -e
 
-mkdir -p /root/.openclaw /home/linuxbrew /tmp/openclaw
+# --- PUID/PGID resolution (LinuxServer.io convention) ---
+# Defaults: 99/100 = nobody/users on Unraid. Override via template fields.
+PUID="${PUID:-99}"
+PGID="${PGID:-100}"
+
+# Validate numeric
+case "$PUID" in
+  ''|*[!0-9]*) echo "[bootstrap] FATAL: PUID='$PUID' must be numeric." 1>&2; exit 1 ;;
+esac
+case "$PGID" in
+  ''|*[!0-9]*) echo "[bootstrap] FATAL: PGID='$PGID' must be numeric." 1>&2; exit 1 ;;
+esac
+
+# --- Re-map the in-image `node` user to host UID/GID ---
+# `-o` (--non-unique) lets us use a UID/GID that may collide with another
+# system user/group (e.g. GID 100 = `users` group already exists on Debian).
+# This is the same approach used by linuxserver.io images.
+CURRENT_UID=$(id -u node 2>/dev/null || echo 1000)
+CURRENT_GID=$(id -g node 2>/dev/null || echo 1000)
+
+if [ "$CURRENT_UID" != "$PUID" ]; then
+  usermod -u "$PUID" -o node 2>/dev/null || {
+    echo "[bootstrap] WARN: usermod failed to set node UID=$PUID; falling back to setpriv with raw UID." 1>&2
+  }
+fi
+if [ "$CURRENT_GID" != "$PGID" ]; then
+  groupmod -g "$PGID" -o node 2>/dev/null || {
+    echo "[bootstrap] WARN: groupmod failed to set node GID=$PGID; falling back to setpriv with raw GID." 1>&2
+  }
+fi
+
+# --- Ensure required directories exist ---
+mkdir -p /root/.openclaw /home/node/clawd /tmp/openclaw
+
 CFG=/root/.openclaw/openclaw.json
 
-# --- Host-side visibility (generic: SMB on Unraid, NFS, etc.) ---
-# Container runs as root, so files written under bind-mounts would default to owner=root,
-# group=root, mode 0600 -- invisible/unwritable to the host user.
+# --- One-shot ownership alignment (only when mismatch detected) ---
+# Runs ONCE at container start. The gateway is then exec'd under PUID:PGID,
+# so every file it creates is naturally owned PUID:PGID -- no loop needed.
 #
-# Generic fix without hardcoding any UID/GID:
-#   1. umask 0002 -- new files default to 0664, dirs to 0775
-#   2. chmod g+s on dirs -- new files inherit GID from the parent directory (setgid bit)
-#   3. chmod -R g+rwX on existing files -- old root-owned files become group-readable/writable
-#
-# The bootstrap does NOT chown or chgrp -- the host owner/group is whatever you set on
-# /mnt/user/appdata/openclaw/* once. Whatever GID you put there is what new files inherit,
-# regardless of value. To preserve existing ownership, run on the host one-time:
-#   chown -R YOUR_HOST_UID:YOUR_HOST_GID /mnt/user/appdata/openclaw
-# (e.g. on Unraid: 99:100 = nobody:users by default; on other hosts use whatever you need.)
-#
-# Override: set OPENCLAW_SKIP_PERM_FIX=1 if you manage permissions externally and don't want
-# the bootstrap touching them.
-PERM_FIX_DIRS="/root/.openclaw /home/node/clawd /tmp/openclaw /root/.local"
+# Override: set OPENCLAW_SKIP_OWNERSHIP_INIT=1 to skip this step entirely
+# (useful if you manage ownership externally, e.g. via Unraid User Scripts).
+PERM_DIRS="/root/.openclaw /home/node/clawd /tmp/openclaw /root/.local /home/linuxbrew /projects"
 
-if [ "${OPENCLAW_SKIP_PERM_FIX:-0}" != "1" ]; then
-  umask 0002
-  for dir in $PERM_FIX_DIRS; do
+if [ "${OPENCLAW_SKIP_OWNERSHIP_INIT:-0}" != "1" ]; then
+  for dir in $PERM_DIRS; do
     [ -d "$dir" ] || continue
-    # Align ownership of everything inside the mount with the mount-point itself.
-    # No hardcoded UID/GID -- chown --reference reads from the live mount root,
-    # which the host has chowned once externally.
-    chown -R --reference="$dir" "$dir" 2>/dev/null || true
-    chmod -R g+rwX,o+rX "$dir" 2>/dev/null || true
-    find "$dir" -type d -exec chmod g+s {} + 2>/dev/null || true
+    DIR_UID=$(stat -c '%u' "$dir" 2>/dev/null || echo 0)
+    DIR_GID=$(stat -c '%g' "$dir" 2>/dev/null || echo 0)
+    if [ "$DIR_UID" != "$PUID" ] || [ "$DIR_GID" != "$PGID" ]; then
+      echo "[bootstrap] aligning ownership: $dir ($DIR_UID:$DIR_GID -> $PUID:$PGID)"
+      chown -R "$PUID:$PGID" "$dir" 2>/dev/null || {
+        echo "[bootstrap] WARN: chown -R failed on $dir; gateway may have permission issues." 1>&2
+      }
+    fi
   done
-  echo "[bootstrap] applied generic perm fix: chown --reference + umask 0002 + setgid on dirs"
-
-  # Runtime owner-sync loop. OpenClaw rotates openclaw.json -> .bak on every config
-  # save, and writes new session/canvas/memory files continuously. setgid on the
-  # parent dir makes new files inherit the GROUP, but the OWNER follows the
-  # writing process (root in our setup). Without runtime sync, fresh root-owned
-  # files keep appearing and SMB clients connected as the host owner can't read them.
-  #
-  # We re-run chown --reference every N seconds (default 5). File modes are left
-  # alone -- openclaw chooses 0600 for openclaw.json deliberately because it
-  # contains gateway tokens and api keys, and overriding that would leak secrets.
-  PERM_FIX_INTERVAL="${OPENCLAW_PERM_FIX_INTERVAL:-5}"
-  (
-    while true; do
-      for dir in $PERM_FIX_DIRS; do
-        [ -d "$dir" ] || continue
-        chown -R --reference="$dir" "$dir" 2>/dev/null || true
-      done
-      sleep "$PERM_FIX_INTERVAL"
-    done
-  ) &
-  SYNC_PID=$!
-  echo "[bootstrap] background owner-sync started (pid=$SYNC_PID, interval=${PERM_FIX_INTERVAL}s)"
+  echo "[bootstrap] ownership init done (PUID=$PUID, PGID=$PGID)"
+else
+  echo "[bootstrap] OPENCLAW_SKIP_OWNERSHIP_INIT=1, skipping ownership init"
 fi
 
 # --- Validate required env ---
@@ -101,10 +109,9 @@ to_bool() {
   esac
 }
 DISABLE_DEVICE_AUTH=$(to_bool "${OPENCLAW_DISABLE_DEVICE_AUTH:-true}")
+CUSTOM_LLM_REASONING=$(to_bool "${CUSTOM_LLM_REASONING:-true}")
 
-# --- Build comma-separated values into JSON arrays ---
-# CSV with whitespace and trailing-slash trimming, returns a comma-separated
-# list of JSON strings (no surrounding brackets).
+# --- CSV -> JSON helpers ---
 csv_to_json_strings() {
   echo "$1" | awk -F, '{
     out=""
@@ -120,19 +127,20 @@ csv_to_json_strings() {
   }'
 }
 
-# CSV of model ids -> JSON array of model objects.
-# Context window and max output tokens are taken from env (with sensible defaults)
-# so users can match their actual model's real parameters.
+# CSV of model ids -> JSON array of model objects, including reasoning flag.
+# Context window and max output tokens come from env so users can match their
+# actual model parameters.
 csv_to_model_objects() {
   CTX="${CUSTOM_LLM_CONTEXT_WINDOW:-128000}"
   MAX="${CUSTOM_LLM_MAX_TOKENS:-32000}"
-  echo "$1" | awk -F, -v ctx="$CTX" -v maxtok="$MAX" '{
+  REA="$CUSTOM_LLM_REASONING"
+  echo "$1" | awk -F, -v ctx="$CTX" -v maxtok="$MAX" -v rea="$REA" '{
     out=""
     for (i=1; i<=NF; i++) {
       v=$i
       gsub(/^[ \t]+|[ \t]+$/, "", v)
       if (v != "") {
-        obj="{\"id\":\"" v "\",\"name\":\"" v "\",\"contextWindow\":" ctx ",\"maxTokens\":" maxtok "}"
+        obj="{\"id\":\"" v "\",\"name\":\"" v "\",\"contextWindow\":" ctx ",\"maxTokens\":" maxtok ",\"reasoning\":" rea "}"
         out = out (out ? "," : "") obj
       }
     }
@@ -145,6 +153,7 @@ ORIGINS_JSON=$(csv_to_json_strings "$OPENCLAW_ALLOWED_ORIGINS")
 # --- Ensure config file exists; openclaw config set requires it ---
 if [ ! -s "$CFG" ]; then
   printf '%s' '{}' > "$CFG"
+  chown "$PUID:$PGID" "$CFG" 2>/dev/null || true
   echo "[bootstrap] created empty $CFG"
 fi
 
@@ -157,13 +166,13 @@ BATCH="$BATCH,{\"path\":\"gateway.controlUi.dangerouslyDisableDeviceAuth\",\"val
 BATCH="$BATCH,{\"path\":\"gateway.controlUi.allowedOrigins\",\"value\":[$ORIGINS_JSON]}"
 BATCH="$BATCH,{\"path\":\"gateway.auth.mode\",\"value\":\"token\"}"
 
-# Note: openclaw logs always go to /tmp/openclaw/openclaw-YYYY-MM-DD.log -- logging.file
-# is currently ignored by the runtime (https://github.com/openclaw/openclaw/issues/61295).
-# So we mount /tmp/openclaw directly to a host volume instead of trying to relocate via config.
-# Built-in rotation: 100 MB per file, 5 numbered archives kept = ~600 MB cap.
-# logging.maxFileBytes is the only documented size knob; logging.maxFiles is NOT in the schema.
-LOG_MAX_BYTES="${OPENCLAW_LOG_MAX_FILE_BYTES:-26214400}"
+# Logging: openclaw 2026.4 namespaces by gateway instance ("/tmp/openclaw-0/" not
+# "/tmp/openclaw/"), so we pin logging.file explicitly to a stable path inside
+# our mounted /tmp/openclaw to keep logs on the host volume. logging.file works
+# again as of openclaw 2026.4+ (issue #61295 closed).
+LOG_MAX_BYTES="${OPENCLAW_LOG_MAX_FILE_BYTES:-104857600}"
 BATCH="$BATCH,{\"path\":\"logging.maxFileBytes\",\"value\":$LOG_MAX_BYTES}"
+BATCH="$BATCH,{\"path\":\"logging.file\",\"value\":\"/tmp/openclaw/openclaw.log\"}"
 
 if [ -n "$CUSTOM_LLM_BASE_URL" ]; then
   BASE_URL=$(echo "$CUSTOM_LLM_BASE_URL" | sed 's:/*$::')
@@ -171,6 +180,16 @@ if [ -n "$CUSTOM_LLM_BASE_URL" ]; then
   CUSTOM_PROVIDER="{\"baseUrl\":\"$BASE_URL\",\"apiKey\":\"\${CUSTOM_LLM_API_KEY}\",\"api\":\"$API_TYPE\",\"models\":[$MODELS_JSON]}"
   BATCH="$BATCH,{\"path\":\"models.mode\",\"value\":\"merge\"}"
   BATCH="$BATCH,{\"path\":\"models.providers.custom\",\"value\":$CUSTOM_PROVIDER}"
+
+  # Pin agent primary model to the first custom model so plugin auto-enable
+  # doesn't silently swap primary to a different namespace (e.g. openai/gpt-5.5
+  # when the openai-image plugin auto-enables and creates models.providers.openai
+  # with the same model id but default contextWindow=200000 from the openai
+  # namespace, ignoring our custom provider's contextWindow=1050000).
+  PRIMARY_MODEL=$(echo "$CUSTOM_LLM_MODEL_ID" | awk -F, '{
+    v=$1; gsub(/^[ \t]+|[ \t]+$/, "", v); print v
+  }')
+  BATCH="$BATCH,{\"path\":\"agents.list\",\"value\":[{\"id\":\"main\",\"model\":\"custom/$PRIMARY_MODEL\"}]}"
 fi
 
 BATCH="$BATCH]"
@@ -184,13 +203,17 @@ if ! node dist/index.js config set --batch-json "$BATCH"; then
   exit 1
 fi
 
-echo "[bootstrap] config applied: origins=[$ORIGINS_JSON], disableDeviceAuth=$DISABLE_DEVICE_AUTH, logMaxBytes=$LOG_MAX_BYTES${CUSTOM_LLM_BASE_URL:+, custom LLM=$BASE_URL ($API_TYPE), models=[$CUSTOM_LLM_MODEL_ID]}"
+# Re-chown openclaw.json after config set rewrites it (atomic-write pattern
+# replaces inode; fresh inode inherits root because we're still root here).
+chown "$PUID:$PGID" "$CFG" 2>/dev/null || true
 
-# Run gateway. We do NOT use `exec` so that we can log the exit reason -- otherwise
-# the container disappears with no clue why. Docker's --restart=unless-stopped policy
-# (set in the template's ExtraParams) handles the actual restart on exit.
-echo "[bootstrap] starting gateway"
-node dist/index.js gateway --bind lan
-RC=$?
-echo "[bootstrap] gateway exited with rc=$RC -- container will be restarted by docker (unless stopped manually)"
-exit $RC
+echo "[bootstrap] config applied: origins=[$ORIGINS_JSON], disableDeviceAuth=$DISABLE_DEVICE_AUTH, logMaxBytes=$LOG_MAX_BYTES${CUSTOM_LLM_BASE_URL:+, custom LLM=$BASE_URL ($API_TYPE), models=[$CUSTOM_LLM_MODEL_ID], reasoning=$CUSTOM_LLM_REASONING, primary=custom/$PRIMARY_MODEL}"
+
+# --- Drop privileges and exec gateway ---
+# `setpriv --init-groups` reads supplementary groups for the new UID from /etc/group.
+# HOME=/root is preserved so openclaw still finds its config at /root/.openclaw
+# (matches the Config Path mount target).
+echo "[bootstrap] dropping privileges to $PUID:$PGID and starting gateway"
+exec setpriv --reuid="$PUID" --regid="$PGID" --init-groups \
+  env HOME=/root PATH="$PATH" \
+  node dist/index.js gateway --bind lan
