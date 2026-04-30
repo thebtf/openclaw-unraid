@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-04-30
+
+Hotfix for v1.1.1 — gateway crash-loop after `usermod` UID remap.
+
+### Fixed
+
+- **Bootstrap re-aligns image-owned filesystem entries after `usermod -u $PUID -o node` and `groupmod -g $PGID -o node`.** When the in-image `node` user is remapped from UID 1000 to a different UID (e.g. 1026), files in `/app`, `/app/node_modules`, and `/home/node` that the image build wrote as `node:node` (1000:1000) become orphaned — owned by literal UID 1000 with no matching user. The remapped node user (1026) can no longer read/write them, so the gateway crashes during runtime-deps install or auth phase, and Docker restart-loops the container.
+
+  v1.1.2 fix: after `usermod`/`groupmod`, the bootstrap walks `/home/node` and `/app` with `find -uid <old>` / `find -gid <old>` and `chown -h` / `chgrp -h` to the new IDs. Same pattern linuxserver.io images use in s6-overlay init scripts. Runs ONLY when remap actually happened (UID_CHANGED=1 / GID_CHANGED=1) — subsequent starts are zero-cost.
+
+### Documentation
+
+- README — added `### Adding custom env vars / secrets` section explaining the OpenClaw `${VAR}` substitution priority (`process.env` → `env.vars` fallback → `env.shellEnv` for bare-metal). Tells users to put new secrets in Unraid template Variable fields, not the openclaw.json `env.vars` block. Lists all places `${VAR}` works (provider apiKey, channel tokens, MCP headers, plugin configs).
+
 ## [1.1.1] — 2026-04-30
 
 Theme: replace the `chown -R --reference` background loop with PUID/PGID + `setpriv`. Pin `agents.list` and `logging.file` so plugin auto-enable and instance namespacing don't silently override our config.
@@ -101,7 +115,8 @@ Initial public release of the Unraid CA template for OpenClaw, verified on Unrai
 
 - README with Quick Start, full Template Settings Reference table, Custom LLM Router walkthrough (LiteLLM / vLLM / Ollama / your own router), Configuration reference, Updating section, Troubleshooting, and pre-CA manual install instructions.
 
-[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/thebtf/openclaw-unraid/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/thebtf/openclaw-unraid/releases/tag/v1.0.0

@@ -339,6 +339,40 @@ After installation, configure channels via Control UI **Config** page or edit `o
 
 Full channel guides: [OpenClaw Docs — Channels](https://docs.openclaw.ai/channels)
 
+### Adding custom env vars / secrets
+
+OpenClaw's `${VAR}` substitution reads from `process.env` first (the Docker env vars given by Unraid), falling back to `env.vars` in `openclaw.json` only if `process.env` misses the key. **Put your secrets in the Unraid template, not in the config.**
+
+**Add a new env var:**
+
+1. Web UI → Docker tab → OpenClaw → **Edit**
+2. **Add another Path, Port, Variable, Label or Device** → **Variable**
+3. Name: anything (e.g. `My token`); Key: `MY_TOKEN`; Value: `secret-value`
+4. **Apply**
+
+**Reference it in config:**
+
+Anywhere in `openclaw.json` (via Control UI → Raw JSON), use `${MY_TOKEN}`:
+```json
+{ "channels": { "slack": { "token": "${MY_TOKEN}" } } }
+```
+
+OpenClaw substitutes it from `process.env.MY_TOKEN` (= the value you set in the template) on every read.
+
+**Why this is better than putting values directly in `env.vars`:**
+
+- One source of truth: Unraid Edit Container UI.
+- Backups / sharing of `openclaw.json` don't leak secrets.
+- Works the same for skills that read `process.env.X` directly.
+- Rotating a key: Edit Container → change value → restart. No config edit needed.
+
+Functions that consume this:
+- LLM provider `apiKey` fields in `models.providers.*`
+- Channel tokens (`channels.telegram.botToken`, `channels.discord.token`)
+- MCP server auth headers (`mcp.servers.*.headers.Authorization`)
+- Plugin configs (`plugins.entries.*.config.*.apiKey`)
+- Anywhere a config field accepts a string
+
 ## Updating
 
 **Via Unraid Docker UI:**
