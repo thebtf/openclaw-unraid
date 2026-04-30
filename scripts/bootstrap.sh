@@ -8,6 +8,10 @@
 #                   config set --batch-json` to apply managed config fields.
 #   PHASE 2 (PUID): exec gateway via `setpriv --reuid --regid --init-groups`.
 #
+# Mount targets follow upstream image conventions: gateway runs as `node` user
+# whose HOME is /home/node. Config lives at $HOME/.openclaw (= /home/node/.openclaw),
+# matching the openclaw image expectation. No HOME hacks, no /root mount targets.
+#
 # No background loops, no recursive chown on a cron tick. Ownership is set ONCE
 # at startup, then enforced naturally because the gateway runs as PUID:PGID and
 # every file it creates inherits that ownership.
@@ -54,23 +58,10 @@ if [ "$CURRENT_GID" != "$PGID" ]; then
   fi
 fi
 
-# Point node user's HOME at /root in /etc/passwd. Two reasons:
-#   1) Our Config Path mount target is /root/.openclaw (not /home/node/.openclaw).
-#      Node.js os.userInfo().homedir reads /etc/passwd — it ignores process.env.HOME.
-#      Without this, openclaw under node:PUID reads ~/.openclaw = /home/node/.openclaw,
-#      which is empty, and exits with "Missing config".
-#   2) /root has mode 0700 by default (root only). chmod 0755 to allow node:PUID
-#      to traverse into it (we already chowned /root/.openclaw contents to PUID:PGID).
-usermod -d /root node 2>/dev/null || {
-  echo "[bootstrap] WARN: usermod -d failed; node HOME may still point to /home/node." 1>&2
-}
-chmod 0755 /root 2>/dev/null || true
-
 # When the node user's UID/GID is remapped, files in the image that were owned
-# by the OLD UID/GID (typically /app, /app/node_modules, /home/node and /tmp/*
-# that the image build wrote as `node:node` = 1000:1000) become orphaned.
-# The remapped node user can no longer read/write them, so the gateway crashes
-# during runtime-deps install or auth phase.
+# by the OLD UID/GID (typically /app, /app/node_modules, /home/node) become
+# orphaned. The remapped node user can no longer read/write them, so the
+# gateway crashes during runtime-deps install or auth phase.
 #
 # Chown those paths to the new UID/GID. This is the same pattern linuxserver.io
 # images use in their s6-overlay init scripts. Runs ONLY when remap actually
@@ -96,9 +87,11 @@ if [ "$GID_CHANGED" = "1" ]; then
 fi
 
 # --- Ensure required directories exist ---
-mkdir -p /root/.openclaw /home/node/clawd /tmp/openclaw
+# All paths under /home/node/* match upstream image conventions. The gateway runs
+# as `node` user whose HOME is /home/node (per /etc/passwd from the image build).
+mkdir -p /home/node/.openclaw /home/node/clawd /home/node/.local /tmp/openclaw
 
-CFG=/root/.openclaw/openclaw.json
+CFG=/home/node/.openclaw/openclaw.json
 
 # --- One-shot ownership alignment (only when mismatch detected) ---
 # Runs ONCE at container start. The gateway is then exec'd under PUID:PGID,
@@ -106,7 +99,7 @@ CFG=/root/.openclaw/openclaw.json
 #
 # Override: set OPENCLAW_SKIP_OWNERSHIP_INIT=1 to skip this step entirely
 # (useful if you manage ownership externally, e.g. via Unraid User Scripts).
-PERM_DIRS="/root/.openclaw /home/node/clawd /tmp/openclaw /root/.local /home/linuxbrew /projects"
+PERM_DIRS="/home/node/.openclaw /home/node/clawd /home/node/.local /tmp/openclaw /home/linuxbrew /projects"
 
 if [ "${OPENCLAW_SKIP_OWNERSHIP_INIT:-0}" != "1" ]; then
   for dir in $PERM_DIRS; do
@@ -243,7 +236,11 @@ BATCH="$BATCH]"
 
 # --- Apply via openclaw native CLI (handles merge + schema validation) ---
 echo "[bootstrap] applying config via openclaw config set"
-if ! node dist/index.js config set --batch-json "$BATCH"; then
+# `openclaw config set` resolves the config path via `os.userInfo().homedir`
+# under the EUID it's running as. We're root here, so it would target
+# /root/.openclaw/openclaw.json -- but our mount is /home/node/.openclaw.
+# Pass HOME=/home/node explicitly so config set writes to the right place.
+if ! HOME=/home/node node dist/index.js config set --batch-json "$BATCH"; then
   echo "[bootstrap] FATAL: openclaw rejected the config update. See errors above." 1>&2
   echo "[bootstrap] batch-json was:" 1>&2
   echo "$BATCH" 1>&2
@@ -258,9 +255,9 @@ echo "[bootstrap] config applied: origins=[$ORIGINS_JSON], disableDeviceAuth=$DI
 
 # --- Drop privileges and exec gateway ---
 # `setpriv --init-groups` reads supplementary groups for the new UID from /etc/group.
-# HOME=/root is preserved so openclaw still finds its config at /root/.openclaw
-# (matches the Config Path mount target).
+# HOME is left to /etc/passwd default for `node` (= /home/node), matching where
+# the Config Path mount lands. No HOME override needed.
 echo "[bootstrap] dropping privileges to $PUID:$PGID and starting gateway"
 exec setpriv --reuid="$PUID" --regid="$PGID" --init-groups \
-  env HOME=/root PATH="$PATH" \
+  env HOME=/home/node PATH="$PATH" \
   node dist/index.js gateway --bind lan

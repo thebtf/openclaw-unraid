@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.4] — 2026-04-30
+
+Replace the `usermod -d /root` hack from v1.1.3 with the canonical fix: mount `Config Path` and `Local Tools Path` under the `node` user's actual `$HOME` (`/home/node`).
+
+### BREAKING (mount target change)
+
+- `Config Path` container target: `/root/.openclaw` → `/home/node/.openclaw`
+- `Local Tools Path` container target: `/root/.local` → `/home/node/.local`
+- `PATH` updated to reference `/home/node/.local/bin` and `/home/node/.cargo/bin` instead of `/root/.local/bin` and `/root/.cargo/bin`.
+
+The host appdata paths (`/mnt/user/appdata/openclaw/config`, `.../local`) are unchanged. Apply the new template and Unraid remounts the same host folders to the new container paths automatically — your existing `openclaw.json`, sessions, credentials, and pip-installed tools all carry over with no manual migration.
+
+### Fixed
+
+- Removed `usermod -d /root` and `chmod 0755 /root` from bootstrap. v1.1.3 worked around a HOME mismatch (gateway running as `node:PUID` reading `os.userInfo().homedir` = `/home/node`, but config mounted at `/root/.openclaw`) by forcing `/etc/passwd` HOME to `/root`. That's a hack: opens `/root` to non-root users and contradicts the upstream image conventions where `node` user's HOME is `/home/node`. v1.1.4 simply mounts to where openclaw natively expects its config.
+- Bootstrap runs `HOME=/home/node node dist/index.js config set` explicitly so `os.userInfo().homedir` resolves to `/home/node` even though the bootstrap process is root.
+
 ## [1.1.3] — 2026-04-30
 
 Hotfix for v1.1.2 — gateway under PUID still couldn't find config.
@@ -123,7 +140,8 @@ Initial public release of the Unraid CA template for OpenClaw, verified on Unrai
 
 - README with Quick Start, full Template Settings Reference table, Custom LLM Router walkthrough (LiteLLM / vLLM / Ollama / your own router), Configuration reference, Updating section, Troubleshooting, and pre-CA manual install instructions.
 
-[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.3...HEAD
+[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.4...HEAD
+[1.1.4]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.0...v1.1.1
