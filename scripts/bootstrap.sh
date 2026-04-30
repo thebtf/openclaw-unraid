@@ -54,6 +54,18 @@ if [ "$CURRENT_GID" != "$PGID" ]; then
   fi
 fi
 
+# Point node user's HOME at /root in /etc/passwd. Two reasons:
+#   1) Our Config Path mount target is /root/.openclaw (not /home/node/.openclaw).
+#      Node.js os.userInfo().homedir reads /etc/passwd — it ignores process.env.HOME.
+#      Without this, openclaw under node:PUID reads ~/.openclaw = /home/node/.openclaw,
+#      which is empty, and exits with "Missing config".
+#   2) /root has mode 0700 by default (root only). chmod 0755 to allow node:PUID
+#      to traverse into it (we already chowned /root/.openclaw contents to PUID:PGID).
+usermod -d /root node 2>/dev/null || {
+  echo "[bootstrap] WARN: usermod -d failed; node HOME may still point to /home/node." 1>&2
+}
+chmod 0755 /root 2>/dev/null || true
+
 # When the node user's UID/GID is remapped, files in the image that were owned
 # by the OLD UID/GID (typically /app, /app/node_modules, /home/node and /tmp/*
 # that the image build wrote as `node:node` = 1000:1000) become orphaned.

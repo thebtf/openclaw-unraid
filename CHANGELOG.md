@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.3] — 2026-04-30
+
+Hotfix for v1.1.2 — gateway under PUID still couldn't find config.
+
+### Fixed
+
+- **Bootstrap now also sets node user's HOME to `/root` in `/etc/passwd` (`usermod -d /root node`) and `chmod 0755 /root`.** Reason: our `Config Path` mount target is `/root/.openclaw`, but Node.js `os.userInfo().homedir` reads from `/etc/passwd` and ignores `process.env.HOME`. After `usermod -u $PUID -o node`, the remapped node user still has `homedir=/home/node` in passwd. OpenClaw under that user resolves `~/.openclaw` to `/home/node/.openclaw`, finds it empty, and exits with `Missing config. Run openclaw setup or set gateway.mode=local`. Container then restart-loops. Fix updates both passwd entry and `/root` traverse permissions so `os.userInfo()` and `process.env.HOME` agree, and node:PUID can read/write `/root/.openclaw`.
+
 ## [1.1.2] — 2026-04-30
 
 Hotfix for v1.1.1 — gateway crash-loop after `usermod` UID remap.
@@ -115,7 +123,8 @@ Initial public release of the Unraid CA template for OpenClaw, verified on Unrai
 
 - README with Quick Start, full Template Settings Reference table, Custom LLM Router walkthrough (LiteLLM / vLLM / Ollama / your own router), Configuration reference, Updating section, Troubleshooting, and pre-CA manual install instructions.
 
-[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.2...HEAD
+[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.3...HEAD
+[1.1.3]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/thebtf/openclaw-unraid/compare/v1.0.0...v1.1.0
