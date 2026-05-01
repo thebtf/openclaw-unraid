@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tooling
+
+- `scripts/merge-template.py` now distinguishes legacy template fields from user-added env vars when migrating a stored `my-OpenClaw.xml`. Stored Config entries absent from upstream are DROPPED if they look like our managed fields (`Type="Path"`, `Type="Port"`, or `Target` matching `OPENCLAW_*` / `CUSTOM_LLM_*` / `PUID` / `PGID` / `PATH`); KEPT otherwise (true user-added secrets like `GITHUB_PAT`, `HF_TOKEN`). This eliminates the duplicate Config Path / Local Tools Path orphans seen when upgrading v1.1.3 → v1.1.4 where the container target moved from `/root/.*` to `/home/node/.*`.
+
 ## [1.1.4] — 2026-04-30
 
 Replace the `usermod -d /root` hack from v1.1.3 with the canonical fix: mount `Config Path` and `Local Tools Path` under the `node` user's actual `$HOME` (`/home/node`).

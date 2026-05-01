@@ -64,15 +64,44 @@ def merge_template(stored_path: Path, upstream_path: Path, output_path: Path) ->
         else:
             skipped_new.append(f"{upstream_cfg.get('Name')} ({target})")
 
-    # Carry over any other top-level user customizations the stored copy may hold
-    # but upstream doesn't (e.g. extra <Config> blocks the user added manually).
+    # Carry over user-added <Config> entries from stored that upstream doesn't have.
+    # Distinguish two cases:
+    #   - LEGACY template field (was in an older version of openclaw.xml, removed since):
+    #       drop it. Heuristic: Type="Path" (we never expect users to add Path mounts
+    #       via Edit Container in a way that should survive a template upgrade), OR
+    #       Target starts with one of our managed env-var prefixes (OPENCLAW_,
+    #       CUSTOM_LLM_, PUID, PGID).
+    #   - USER-ADDED env var (custom secret/variable the user added via Edit Container):
+    #       keep it.
     upstream_targets = {cfg.get("Target") for cfg in upstream_root.findall("Config")}
     upstream_container = upstream_root  # root is <Container>
+    managed_prefixes = ("OPENCLAW_", "CUSTOM_LLM_")
+    managed_exact = {"PUID", "PGID", "PATH"}
+
+    def is_legacy_managed(cfg):
+        cfg_type = cfg.get("Type", "")
+        target = cfg.get("Target", "") or ""
+        if cfg_type == "Path":
+            return True  # Path mounts are always template-managed; orphan = legacy.
+        if cfg_type == "Port":
+            return True  # Same for ports.
+        if target in managed_exact:
+            return True
+        for p in managed_prefixes:
+            if target.startswith(p):
+                return True
+        return False
+
     for stored_cfg in stored_root.findall("Config"):
-        if stored_cfg.get("Target") not in upstream_targets:
-            upstream_container.append(stored_cfg)
-            print(f"NOTE: kept user-added <Config> not present in upstream: "
+        if stored_cfg.get("Target") in upstream_targets:
+            continue
+        if is_legacy_managed(stored_cfg):
+            print(f"DROPPED legacy template field (not in upstream): "
                   f"{stored_cfg.get('Name')} ({stored_cfg.get('Target')})")
+            continue
+        upstream_container.append(stored_cfg)
+        print(f"KEPT user-added <Config> not present in upstream: "
+              f"{stored_cfg.get('Name')} ({stored_cfg.get('Target')})")
 
     # Backup before writing
     backup_path = output_path.with_suffix(output_path.suffix + ".bak")
