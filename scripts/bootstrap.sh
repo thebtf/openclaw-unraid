@@ -118,6 +118,32 @@ else
   echo "[bootstrap] OPENCLAW_SKIP_OWNERSHIP_INIT=1, skipping ownership init"
 fi
 
+# --- Clean up stale plugin-runtime-deps locks ---
+# OpenClaw uses a filesystem lock to serialize bundled-deps mirroring across
+# parallel gateway processes. Lock dir contains owner.json with the holder PID.
+# When a previous container crash leaves the lock behind, the next start waits
+# 5 minutes for the lock and then exits with SECRETS_RELOADER_DEGRADED, looping.
+#
+# Detect stale locks: owner.json says pid=N, but no such process is alive in
+# our pid namespace -> nuke the lock dir. Safe because we run inside a single
+# container, no other gateway can hold a live lock here.
+LOCKS_GLOB=/home/node/.openclaw/plugin-runtime-deps/*/.openclaw-runtime-mirror.lock
+for lock_dir in $LOCKS_GLOB; do
+  [ -d "$lock_dir" ] || continue
+  owner_file="$lock_dir/owner.json"
+  if [ ! -f "$owner_file" ]; then
+    echo "[bootstrap] removing lock without owner.json: $lock_dir"
+    rm -rf "$lock_dir" 2>/dev/null || true
+    continue
+  fi
+  # Extract pid (sed beats jq dependency: owner.json is small and stable)
+  owner_pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' "$owner_file" | head -1)
+  if [ -z "$owner_pid" ] || [ ! -d "/proc/$owner_pid" ]; then
+    echo "[bootstrap] removing stale lock (owner pid=$owner_pid not alive): $lock_dir"
+    rm -rf "$lock_dir" 2>/dev/null || true
+  fi
+done
+
 # --- Validate required env ---
 if [ -z "$OPENCLAW_ALLOWED_ORIGINS" ]; then
   echo "[bootstrap] FATAL: OPENCLAW_ALLOWED_ORIGINS is required (e.g. http://192.168.1.41:18789)." 1>&2

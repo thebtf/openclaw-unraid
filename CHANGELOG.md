@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.5] — 2026-05-01
+
+Hotfix for stale `plugin-runtime-deps` lock that survives container crashes.
+
+### Fixed
+
+- **Bootstrap nukes stale plugin-runtime-deps locks at startup.** OpenClaw uses `/home/node/.openclaw/plugin-runtime-deps/<version>/.openclaw-runtime-mirror.lock` to serialize bundled-deps mirroring across parallel gateway processes. When a previous container crashed mid-mirror (e.g. v1.1.1/2/3 crashes during the PUID transition), the lock dir survives with an `owner.json` pointing at a long-dead pid. The next gateway start waits 5 min for the lock, then exits with `SECRETS_RELOADER_DEGRADED — Timed out waiting for bundled runtime deps lock` and Docker restart-loops the container. The openclaw error message itself instructs: *"If no OpenClaw/npm install is running, remove the lock directory and retry."*
+
+  Bootstrap now scans `/home/node/.openclaw/plugin-runtime-deps/*/.openclaw-runtime-mirror.lock` before launching the gateway. For each lock: read `owner.json`, parse `pid`, check `/proc/<pid>` — if the pid isn't alive in our PID namespace, `rm -rf` the lock dir. Safe because the bootstrap runs once per container start and there's no other gateway process in the namespace that could legitimately hold the lock.
+
 ### Tooling
 
 - `scripts/merge-template.py` now distinguishes legacy template fields from user-added env vars when migrating a stored `my-OpenClaw.xml`. Stored Config entries absent from upstream are DROPPED if they look like our managed fields (`Type="Path"`, `Type="Port"`, or `Target` matching `OPENCLAW_*` / `CUSTOM_LLM_*` / `PUID` / `PGID` / `PATH`); KEPT otherwise (true user-added secrets like `GITHUB_PAT`, `HF_TOKEN`). This eliminates the duplicate Config Path / Local Tools Path orphans seen when upgrading v1.1.3 → v1.1.4 where the container target moved from `/root/.*` to `/home/node/.*`.
@@ -144,7 +154,8 @@ Initial public release of the Unraid CA template for OpenClaw, verified on Unrai
 
 - README with Quick Start, full Template Settings Reference table, Custom LLM Router walkthrough (LiteLLM / vLLM / Ollama / your own router), Configuration reference, Updating section, Troubleshooting, and pre-CA manual install instructions.
 
-[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.4...HEAD
+[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.5...HEAD
+[1.1.5]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.1...v1.1.2
