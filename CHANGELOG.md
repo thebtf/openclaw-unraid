@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.6] — 2026-05-01
+
+Hotfix for `EACCES: permission denied` on legacy files inside `/home/node/.openclaw`.
+
+### Fixed
+
+- **Bootstrap recursively scans `/home/node/.openclaw` for non-PUID files at startup** and runs `chown -R` if any are found. Reason: v1.1.0-1.1.3 wrote files inside the config dir as root. After v1.1.4 switched the mount target and the gateway runs as `node:PUID`, the legacy root-owned files (e.g. `devices/paired.json`) caused `EACCES` when the gateway tried to read them. The previous bootstrap only checked the mount-point root, missing inner files.
+
+### Two-tier ownership-init logic
+
+Bootstrap now distinguishes:
+- **DEEP_PERM_DIRS** (`/home/node/.openclaw`) — small, openclaw-managed; recursive find for `-not -uid PUID -o -not -gid PGID`, full `chown -R` if mismatch found. Catches inner-file ownership drift.
+- **SHALLOW_PERM_DIRS** (workspace, local pip installs, logs, homebrew, projects) — potentially large user trees; only check the mount-point root. Avoids the chown-loop death spiral on 100k+ file workspaces.
+
 ## [1.1.5] — 2026-05-01
 
 Hotfix for stale `plugin-runtime-deps` lock that survives container crashes.
@@ -154,7 +168,8 @@ Initial public release of the Unraid CA template for OpenClaw, verified on Unrai
 
 - README with Quick Start, full Template Settings Reference table, Custom LLM Router walkthrough (LiteLLM / vLLM / Ollama / your own router), Configuration reference, Updating section, Troubleshooting, and pre-CA manual install instructions.
 
-[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.5...HEAD
+[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.6...HEAD
+[1.1.6]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.5...v1.1.6
 [1.1.5]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.3...v1.1.4
 [1.1.3]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.2...v1.1.3

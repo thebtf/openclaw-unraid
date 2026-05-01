@@ -99,15 +99,35 @@ CFG=/home/node/.openclaw/openclaw.json
 #
 # Override: set OPENCLAW_SKIP_OWNERSHIP_INIT=1 to skip this step entirely
 # (useful if you manage ownership externally, e.g. via Unraid User Scripts).
-PERM_DIRS="/home/node/.openclaw /home/node/clawd /home/node/.local /tmp/openclaw /home/linuxbrew /projects"
+# Two tiers of perm dirs:
+#   DEEP_PERM_DIRS — small, openclaw-managed, must be fully consistent. Recursive
+#     scan: chown -R if ANY file inside has wrong owner. Catches files left over
+#     from previous template versions (e.g. devices/paired.json owned by root
+#     because v1.1.0-1.1.3 wrote it as root before we switched to PUID/PGID).
+#     /home/node/.openclaw is small (a few MB), recursive scan is fast.
+#   SHALLOW_PERM_DIRS — potentially large (workspace, log archive, local pip
+#     installs). Recursive find on a 100k-file tree is the chown-loop death
+#     spiral we already escaped. Only check the mount root: if it matches PUID,
+#     trust that the gateway (which runs as PUID) wrote everything correctly.
+DEEP_PERM_DIRS="/home/node/.openclaw"
+SHALLOW_PERM_DIRS="/home/node/clawd /home/node/.local /tmp/openclaw /home/linuxbrew /projects"
 
 if [ "${OPENCLAW_SKIP_OWNERSHIP_INIT:-0}" != "1" ]; then
-  for dir in $PERM_DIRS; do
+  for dir in $DEEP_PERM_DIRS; do
+    [ -d "$dir" ] || continue
+    if find "$dir" \( -not -uid "$PUID" -o -not -gid "$PGID" \) -print -quit 2>/dev/null | grep -q .; then
+      echo "[bootstrap] deep-aligning ownership: $dir (some entries != $PUID:$PGID)"
+      chown -R "$PUID:$PGID" "$dir" 2>/dev/null || {
+        echo "[bootstrap] WARN: chown -R failed on $dir; gateway may have permission issues." 1>&2
+      }
+    fi
+  done
+  for dir in $SHALLOW_PERM_DIRS; do
     [ -d "$dir" ] || continue
     DIR_UID=$(stat -c '%u' "$dir" 2>/dev/null || echo 0)
     DIR_GID=$(stat -c '%g' "$dir" 2>/dev/null || echo 0)
     if [ "$DIR_UID" != "$PUID" ] || [ "$DIR_GID" != "$PGID" ]; then
-      echo "[bootstrap] aligning ownership: $dir ($DIR_UID:$DIR_GID -> $PUID:$PGID)"
+      echo "[bootstrap] aligning ownership (root-only): $dir ($DIR_UID:$DIR_GID -> $PUID:$PGID)"
       chown -R "$PUID:$PGID" "$dir" 2>/dev/null || {
         echo "[bootstrap] WARN: chown -R failed on $dir; gateway may have permission issues." 1>&2
       }
