@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.8] — 2026-05-01
+
+### Added
+
+- `OPENCLAW_SKIP_SYSTEM_PATH_REMAP` toggle (template field `Skip System Path Remap`, default `0`). When set to `1`, bootstrap skips the recursive chown sweep over `/home/node` and `/app` after `usermod -u $PUID -o node`. On large `/app` trees this scan adds 2-3 minutes per Apply. Power-users who don't expect Unraid to recreate the container can flip this on for faster Apply cycles. WARNING: if Unraid recreates the container while this flag is on, the gateway fails to start (orphaned UID 1000 files in /app); flip back to `0` to recover.
+- `scripts/update-on-unraid.sh` — Homebrew-style one-liner wrapper for upgrading an installed container:
+
+  ```bash
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/thebtf/openclaw-unraid/master/scripts/update-on-unraid.sh)"
+  ```
+
+  Auto-detects the installed container name by scanning `templates-user/my-*.xml` for fingerprints UNIQUE to `thebtf/openclaw-unraid` (forum thread URL `forums.unraid.net/topic/196865-` or icon URL `raw.githubusercontent.com/thebtf/openclaw-unraid`). Avoids false-matching other forks built on the openclaw upstream image. Works for any container name. Fetches upstream `openclaw.xml`, fetches `merge-template.py`, runs the merge, prints new fields. Override via env vars: `OPENCLAW_TAG=v1.1.8`, `OPENCLAW_NAME=MyOpenClaw`. Multiple matches → script lists them and refuses to guess.
+
+### Changed
+
+- **All boolean template fields unified to `0`/`1`** (matching OpenClaw upstream env conventions like `OPENCLAW_GATEWAY_STARTUP_TRACE=1`, `OPENCLAW_LOAD_SHELL_ENV=1`). Previously some toggles used `true`/`false` (`OPENCLAW_DISABLE_DEVICE_AUTH`, `CUSTOM_LLM_REASONING`), others used `0`/`1` (`OPENCLAW_SKIP_OWNERSHIP_INIT`). Now consistent: all four boolean toggles accept and default to `0`/`1`. Bootstrap's `to_bool()` helper still accepts `true|false|1|0|yes|no|on|off` for backwards compatibility — existing values keep working.
+
 ## [1.1.7] — 2026-05-01
 
 Fix `merge-template.py` heuristic that nuked user-added env vars.
@@ -176,7 +193,8 @@ Initial public release of the Unraid CA template for OpenClaw, verified on Unrai
 
 - README with Quick Start, full Template Settings Reference table, Custom LLM Router walkthrough (LiteLLM / vLLM / Ollama / your own router), Configuration reference, Updating section, Troubleshooting, and pre-CA manual install instructions.
 
-[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.7...HEAD
+[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.8...HEAD
+[1.1.8]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.7...v1.1.8
 [1.1.7]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.6...v1.1.7
 [1.1.6]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.5...v1.1.6
 [1.1.5]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.4...v1.1.5

@@ -222,10 +222,11 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | Telegram Bot Token | Variable | No | — | Telegram bot from [@BotFather](https://t.me/BotFather) |
 | **Advanced** |
 | Gateway Port | Variable | No | `18789` | Override if 18789 is taken |
-| Disable Device Auth | Variable | No | `true` | LAN-friendly default; set `false` if you front the UI with HTTPS |
+| Disable Device Auth | Variable | No | `1` | LAN-friendly default; set `0` if you front the UI with HTTPS |
 | Log Max File Bytes | Variable | No | `104857600` | 100 MB per log file before rotation (matches OpenClaw upstream default). Archive count is hardcoded to 5 by openclaw. |
 | Skip Ownership Init | Variable | No | `0` | Set `1` to skip the one-shot ownership alignment at container start. Bootstrap normally aligns mount ownership to PUID:PGID once, then exec's the gateway under those IDs (no loops). Disable only if you manage ownership externally. |
-| Custom LLM Reasoning | Variable | No | `true` | Whether the custom LLM model(s) support reasoning/thinking blocks. Default `true` for modern models (gpt-5.5, o1, claude-opus-4.7). Set `false` for non-reasoning models. |
+| Custom LLM Reasoning | Variable | No | `1` | Whether the custom LLM model(s) support reasoning/thinking blocks. Default `1` (enabled) for modern models (gpt-5.5, o1, claude-opus-4.7). Set `0` for non-reasoning models. |
+| Skip System Path Remap | Variable | No | `0` | Set `1` to skip the /home/node and /app recursive chown sweep at start (saves 2-3 min per Apply). Use only when filesystem is already aligned and you don't expect Unraid to recreate the container. |
 | PATH | Variable | No | (auto-set) | System PATH — includes `~/.local/bin`, `~/.cargo/bin`, Homebrew, Bun. See `openclaw.xml` `<Default>` for the full value. |
 | Web Search API Key | Variable | No | — | Brave Search API |
 
@@ -384,13 +385,30 @@ docker pull ghcr.io/openclaw/openclaw:latest
 docker restart OpenClaw
 ```
 
-**When the template itself has changed** (new env vars, updated PostArgs, restructured ExtraParams):
+**When the template itself has changed** (new env vars, updated PostArgs, restructured ExtraParams) — Homebrew-style one-liner on the Unraid console:
 
 ```bash
-python3 scripts/merge-template.py \
-    --stored /boot/config/plugins/dockerMan/templates-user/my-OpenClaw.xml \
-    --upstream /boot/config/plugins/dockerMan/templates-user/openclaw.xml \
-    --output /boot/config/plugins/dockerMan/templates-user/my-OpenClaw.xml
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/thebtf/openclaw-unraid/master/scripts/update-on-unraid.sh)"
+```
+
+The wrapper auto-detects your installed container by scanning `templates-user/my-*.xml` for our unique fingerprints (forum thread URL + icon URL). Refreshes the upstream `openclaw.xml` (used by Add Container) AND merges it into your stored `my-<Name>.xml` (used by Edit Container) — preserving every value you've filled in, writing a `.bak`, and printing the list of NEW fields.
+
+After it finishes: Unraid Web UI → Docker → your container → Edit Container → set any new fields shown → Apply.
+
+Override via env vars:
+- `OPENCLAW_TAG=v1.1.8` — pin a specific version
+- `OPENCLAW_NAME=MyOpenClaw` — override container name (auto-detect refuses to guess if multiple matches found)
+
+**Manual fallback** if you don't want to run the wrapper:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/thebtf/openclaw-unraid/master/scripts/merge-template.py -o /tmp/merge-template.py
+curl -fsSL https://raw.githubusercontent.com/thebtf/openclaw-unraid/master/openclaw.xml \
+  -o /boot/config/plugins/dockerMan/templates-user/openclaw.xml
+python3 /tmp/merge-template.py \
+  --stored /boot/config/plugins/dockerMan/templates-user/my-OpenClaw.xml \
+  --upstream /boot/config/plugins/dockerMan/templates-user/openclaw.xml \
+  --output /boot/config/plugins/dockerMan/templates-user/my-OpenClaw.xml
 ```
 
 The script overlays user-filled values from the stored template onto the upstream xml, writes a `.bak` of the original, and prints any new fields you should review in the Unraid Edit Container UI. Run this before clicking **Edit Container** so your tokens, API keys, and paths survive the upgrade while you pick up new template-level fields.
@@ -418,9 +436,9 @@ Browsers require a secure context (HTTPS or `http://localhost`) to use the Web C
 
 Two fixes:
 - **Use HTTPS** — front the container with a reverse proxy (Traefik, Caddy, NPM) and open `https://your-domain/?token=...`. Then set `OPENCLAW_DISABLE_DEVICE_AUTH=false` in the template for full device-identity protection.
-- **Disable device auth (default for this template)** — `OPENCLAW_DISABLE_DEVICE_AUTH=true` (default). Token auth still required. Acceptable for LAN-only / homelab use; not recommended over the open internet.
+- **Disable device auth (default for this template)** — `OPENCLAW_DISABLE_DEVICE_AUTH=1` (default). Token auth still required. Acceptable for LAN-only / homelab use; not recommended over the open internet.
 
-The template default is `true` because most Unraid users access the Control UI over plain HTTP on the LAN. If your setup already gives you HTTPS, switch to `false`.
+The template default is `1` (enabled) because most Unraid users access the Control UI over plain HTTP on the LAN. If your setup already gives you HTTPS, switch to `0`.
 
 ### `disconnected (1008): control ui requires HTTPS or localhost`
 

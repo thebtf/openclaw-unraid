@@ -66,24 +66,36 @@ fi
 # Chown those paths to the new UID/GID. This is the same pattern linuxserver.io
 # images use in their s6-overlay init scripts. Runs ONLY when remap actually
 # happened (UID_CHANGED=1 or GID_CHANGED=1) -- subsequent starts skip this.
-SYSTEM_PATHS="/home/node /app"
-if [ "$UID_CHANGED" = "1" ]; then
-  for sys_dir in $SYSTEM_PATHS; do
-    [ -d "$sys_dir" ] || continue
-    if find "$sys_dir" -uid "$CURRENT_UID" -print -quit 2>/dev/null | grep -q .; then
-      echo "[bootstrap] re-aligning system path ownership: $sys_dir (uid $CURRENT_UID -> $PUID)"
-      find "$sys_dir" -uid "$CURRENT_UID" -exec chown -h "$PUID" {} + 2>/dev/null || true
-    fi
-  done
-fi
-if [ "$GID_CHANGED" = "1" ]; then
-  for sys_dir in $SYSTEM_PATHS; do
-    [ -d "$sys_dir" ] || continue
-    if find "$sys_dir" -gid "$CURRENT_GID" -print -quit 2>/dev/null | grep -q .; then
-      echo "[bootstrap] re-aligning system path group: $sys_dir (gid $CURRENT_GID -> $PGID)"
-      find "$sys_dir" -gid "$CURRENT_GID" -exec chgrp -h "$PGID" {} + 2>/dev/null || true
-    fi
-  done
+#
+# Override: set OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 to skip the /app and /home/node
+# chown sweep entirely. Useful once the image filesystem is already aligned
+# (e.g. a previous start completed it) and you want subsequent Apply cycles to
+# finish in seconds instead of minutes spent rescanning /app/node_modules.
+# WARNING: if Unraid recreated the container (Docker rm + create) the image
+# overlay is fresh, /app is back to UID 1000, and gateway will fail. In that
+# case un-set the skip and let bootstrap re-align once.
+if [ "${OPENCLAW_SKIP_SYSTEM_PATH_REMAP:-0}" = "1" ]; then
+  echo "[bootstrap] OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1, skipping /home/node and /app chown sweep"
+else
+  SYSTEM_PATHS="/home/node /app"
+  if [ "$UID_CHANGED" = "1" ]; then
+    for sys_dir in $SYSTEM_PATHS; do
+      [ -d "$sys_dir" ] || continue
+      if find "$sys_dir" -uid "$CURRENT_UID" -print -quit 2>/dev/null | grep -q .; then
+        echo "[bootstrap] re-aligning system path ownership: $sys_dir (uid $CURRENT_UID -> $PUID)"
+        find "$sys_dir" -uid "$CURRENT_UID" -exec chown -h "$PUID" {} + 2>/dev/null || true
+      fi
+    done
+  fi
+  if [ "$GID_CHANGED" = "1" ]; then
+    for sys_dir in $SYSTEM_PATHS; do
+      [ -d "$sys_dir" ] || continue
+      if find "$sys_dir" -gid "$CURRENT_GID" -print -quit 2>/dev/null | grep -q .; then
+        echo "[bootstrap] re-aligning system path group: $sys_dir (gid $CURRENT_GID -> $PGID)"
+        find "$sys_dir" -gid "$CURRENT_GID" -exec chgrp -h "$PGID" {} + 2>/dev/null || true
+      fi
+    done
+  fi
 fi
 
 # --- Ensure required directories exist ---
