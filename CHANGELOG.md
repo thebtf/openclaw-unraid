@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.7] — 2026-05-01
+
+Fix `merge-template.py` heuristic that nuked user-added env vars.
+
+### Fixed
+
+- **`merge-template.py` no longer drops Type=Variable entries**, regardless of `Target` prefix. Previous v1.1.5 heuristic dropped any orphan with Target starting with `OPENCLAW_*` / `CUSTOM_LLM_*` — but users legitimately add upstream OpenClaw env vars (e.g. `OPENCLAW_GATEWAY_STARTUP_TRACE`, `OPENCLAW_LOG_LEVEL`, `OPENCLAW_DIAGNOSTICS`) via Edit Container that the template doesn't ship by default. Those got nuked on every upgrade. Now we only drop `Type="Path"` and `Type="Port"` orphans — no false positives. Legacy template Variables (`OPENCLAW_SKIP_PERM_FIX`, `OPENCLAW_PERM_FIX_INTERVAL`) survive as orphans; user removes them manually once via Edit Container, no death-spiral risk.
+
 ## [1.1.6] — 2026-05-01
 
 Hotfix for `EACCES: permission denied` on legacy files inside `/home/node/.openclaw`.
@@ -168,7 +176,8 @@ Initial public release of the Unraid CA template for OpenClaw, verified on Unrai
 
 - README with Quick Start, full Template Settings Reference table, Custom LLM Router walkthrough (LiteLLM / vLLM / Ollama / your own router), Configuration reference, Updating section, Troubleshooting, and pre-CA manual install instructions.
 
-[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.6...HEAD
+[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.7...HEAD
+[1.1.7]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.6...v1.1.7
 [1.1.6]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.5...v1.1.6
 [1.1.5]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.4...v1.1.5
 [1.1.4]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.3...v1.1.4
