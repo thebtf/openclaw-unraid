@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.9] — 2026-05-01
+
+Rename Config Path → OpenClaw Data, fix Workspace mount to match upstream sub-mount pattern.
+
+### BREAKING (mount target change)
+
+- `Config Path` → renamed to **`OpenClaw Data`**. Host default changed from `.../config` to `.../data` for new installs. Existing installs: your host path value carries over via merge-template, no data loss.
+- `Workspace Path` → target changed from `/home/node/clawd` (legacy, unused by openclaw 2026.4) to **`/home/node/.openclaw/workspace`** (sub-mount overlaying the `workspace/` subdirectory inside OpenClaw Data). This matches the upstream `docker-compose.yml` pattern (`OPENCLAW_CONFIG_DIR` + `OPENCLAW_WORKSPACE_DIR`).
+
+### Migration for existing installs
+
+Workspace files currently live inside your old config folder (e.g. `appdata/openclaw/config/workspace/`). Move them to the workspace host folder before Apply:
+
+```bash
+mv /mnt/user/appdata/openclaw/config/workspace/* /mnt/user/appdata/openclaw/workspace/
+mv /mnt/user/appdata/openclaw/config/workspace/.* /mnt/user/appdata/openclaw/workspace/ 2>/dev/null
+rmdir /mnt/user/appdata/openclaw/config/workspace
+```
+
+After Apply, Docker sub-mounts `appdata/openclaw/workspace/` onto `/home/node/.openclaw/workspace/` inside the container. OpenClaw sees the same path it always did (`~/.openclaw/workspace/`), but the data lives on a separate host folder.
+
+### Why
+
+- OpenClaw 2026.4 stores workspace at `~/.openclaw/workspace/` (not `/home/node/clawd`). The old Workspace mount target was unused — workspace was inside the config mount.
+- Having 267k workspace files inside the config mount made deep ownership scans slow and prevented separate backups.
+- "Config Path" was misleading — `~/.openclaw` contains config + workspace + sessions + plugins + media + everything. "OpenClaw Data" is honest.
+
 ## [1.1.8] — 2026-05-01
 
 ### Added
@@ -193,7 +220,8 @@ Initial public release of the Unraid CA template for OpenClaw, verified on Unrai
 
 - README with Quick Start, full Template Settings Reference table, Custom LLM Router walkthrough (LiteLLM / vLLM / Ollama / your own router), Configuration reference, Updating section, Troubleshooting, and pre-CA manual install instructions.
 
-[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.8...HEAD
+[Unreleased]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.9...HEAD
+[1.1.9]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.8...v1.1.9
 [1.1.8]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.7...v1.1.8
 [1.1.7]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.6...v1.1.7
 [1.1.6]: https://github.com/thebtf/openclaw-unraid/compare/v1.1.5...v1.1.6

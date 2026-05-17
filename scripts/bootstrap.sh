@@ -101,7 +101,7 @@ fi
 # --- Ensure required directories exist ---
 # All paths under /home/node/* match upstream image conventions. The gateway runs
 # as `node` user whose HOME is /home/node (per /etc/passwd from the image build).
-mkdir -p /home/node/.openclaw /home/node/clawd /home/node/.local /tmp/openclaw
+mkdir -p /home/node/.openclaw /home/node/.openclaw/workspace /home/node/.local /tmp/openclaw
 
 CFG=/home/node/.openclaw/openclaw.json
 
@@ -122,7 +122,7 @@ CFG=/home/node/.openclaw/openclaw.json
 #     spiral we already escaped. Only check the mount root: if it matches PUID,
 #     trust that the gateway (which runs as PUID) wrote everything correctly.
 DEEP_PERM_DIRS="/home/node/.openclaw"
-SHALLOW_PERM_DIRS="/home/node/clawd /home/node/.local /tmp/openclaw /home/linuxbrew /projects"
+SHALLOW_PERM_DIRS="/home/node/.openclaw/workspace /home/node/.local /tmp/openclaw /home/linuxbrew /projects"
 
 if [ "${OPENCLAW_SKIP_OWNERSHIP_INIT:-0}" != "1" ]; then
   for dir in $DEEP_PERM_DIRS; do
