@@ -7,8 +7,13 @@ name: build-image
 #   latest            - tracks upstream :latest
 #   <upstream-tag>    - when built from a pinned upstream tag (workflow input)
 #
-# The daily cron compares the upstream :latest digest with the digest label
-# baked into our current :latest; skips the build when nothing changed.
+# Pipeline: drift check (cron) -> build local -> SMOKE -> push.
+# The smoke gate boots the freshly built image with a throwaway config and
+# requires the bootstrap to reach the gateway phase; a broken upstream
+# change therefore never reaches :latest (deployments keep running the
+# previous image). Any failure files/updates a "rebuild failed" issue in
+# this repo, which also produces an email through normal issue
+# notifications on top of the standard Actions failure email.
 
 on:
   push:
@@ -29,6 +34,7 @@ on:
 permissions:
   contents: read
   packages: write
+  issues: write
 
 env:
   UPSTREAM_IMAGE: ghcr.io/openclaw/openclaw
@@ -37,6 +43,9 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      built: ${{ steps.gate.outputs.build }}
+      upstream_digest: ${{ steps.base.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -60,8 +69,19 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Single gate for every later step: push/dispatch always build;
+      # cron builds only on digest drift.
+      - name: Decide whether to build
+        id: gate
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ] || [ "${{ steps.drift.outputs.changed }}" = "true" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Log in to GHCR
-        if: github.event_name != 'schedule' || steps.drift.outputs.changed == 'true'
+        if: steps.gate.outputs.build == 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -69,18 +89,83 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Buildx
-        if: github.event_name != 'schedule' || steps.drift.outputs.changed == 'true'
+        if: steps.gate.outputs.build == 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Capture upstream digest for provenance label
-        if: github.event_name != 'schedule' || steps.drift.outputs.changed == 'true'
+        if: steps.gate.outputs.build == 'true'
         id: base
         run: |
           DIGEST=$(docker buildx imagetools inspect "$UPSTREAM_IMAGE:${{ steps.tag.outputs.tag }}" --format '{{json .Manifest}}' | jq -r .digest)
           echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
-        if: github.event_name != 'schedule' || steps.drift.outputs.changed == 'true'
+      # Build WITHOUT pushing: load into the runner's docker for the smoke gate.
+      - name: Build (local, for smoke)
+        if: steps.gate.outputs.build == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          build-args: |
+            OPENCLAW_TAG=${{ steps.tag.outputs.tag }}
+          labels: |
+            org.opencontainers.image.base.digest=${{ steps.base.outputs.digest }}
+          tags: ${{ env.DERIVED_IMAGE }}:smoke
+
+      # SMOKE GATE: boot the image with throwaway config and require the
+      # bootstrap to get through PUID remap + managed config keys and reach
+      # the gateway phase. Catches every "loud" break class: entrypoint file
+      # paths gone, config set CLI changed, node user renamed, setpriv missing.
+      - name: Smoke test
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          set -eu
+          docker run -d --name smoke \
+            -e PUID=1234 -e PGID=1000 \
+            -e OPENCLAW_GATEWAY_TOKEN=smoke-token \
+            -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
+            -e CUSTOM_LLM_BASE_URL=http://127.0.0.1:9/v1 \
+            -e CUSTOM_LLM_API_KEY=smoke \
+            -e CUSTOM_LLM_API_TYPE=openai-completions \
+            -e CUSTOM_LLM_MODEL_ID=smoke-model \
+            "$DERIVED_IMAGE:smoke"
+
+          # Bootstrap must reach the gateway exec line, and the container
+          # must still be alive (not crash-looped) shortly after.
+          ok=""
+          for i in $(seq 1 24); do
+            if docker logs smoke 2>&1 | grep -q "dropping privileges to 1234:1000 and starting gateway"; then
+              ok=1; break
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' smoke)" != "true" ]; then
+              break
+            fi
+            sleep 5
+          done
+          echo "--- bootstrap log ---"
+          docker logs smoke 2>&1 | tail -60
+          if [ -z "$ok" ]; then
+            echo "SMOKE FAIL: bootstrap never reached the gateway phase" 1>&2
+            docker rm -f smoke >/dev/null 2>&1 || true
+            exit 1
+          fi
+          sleep 10
+          if [ "$(docker inspect -f '{{.State.Running}}' smoke)" != "true" ]; then
+            echo "SMOKE FAIL: container died right after reaching gateway phase" 1>&2
+            docker logs smoke 2>&1 | tail -40
+            docker rm -f smoke >/dev/null 2>&1 || true
+            exit 1
+          fi
+          # First-boot seed marker must exist (CUSTOM_LLM_* was set).
+          docker exec smoke sh -c 'test -f /home/node/.openclaw/.unraid-template-seeded' \
+            || { echo "SMOKE FAIL: seed marker missing" 1>&2; docker rm -f smoke >/dev/null 2>&1; exit 1; }
+          echo "SMOKE OK"
+          docker rm -f smoke >/dev/null
+
+      # Push happens only after the smoke gate passed (cache hit — instant).
+      - name: Push
+        if: steps.gate.outputs.build == 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -92,3 +177,39 @@ jobs:
           tags: |
             ${{ env.DERIVED_IMAGE }}:latest
             ${{ steps.tag.outputs.tag != 'latest' && format('{0}:{1}', env.DERIVED_IMAGE, steps.tag.outputs.tag) || '' }}
+
+  # FAILURE REGISTRATION: file (or update) an issue so the break is recorded
+  # in the repo and produces an email via issue notifications. Deduplicated
+  # by title — one open issue per break, follow-up failures add comments.
+  on-failure:
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: failure()
+    permissions:
+      issues: write
+    steps:
+      - name: File or update failure issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="Automated rebuild failed (${{ github.event_name }})"
+          BODY="Derived-image build/smoke failed.
+
+          - Run: $RUN_URL
+          - Trigger: ${{ github.event_name }}
+          - Upstream digest: ${{ needs.build.outputs.upstream_digest || 'n/a (failed before digest capture)' }}
+
+          :latest was NOT updated — deployments keep the previous image.
+          Check the smoke log in the run; likely an upstream image layout change
+          (entrypoint paths, config CLI, node user) that docker/unraid-entrypoint.sh
+          must adapt to."
+          EXISTING=$(gh issue list --repo "${{ github.repository }}" --state open \
+            --search "in:title \"$TITLE\"" --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh issue comment "$EXISTING" --repo "${{ github.repository }}" \
+              --body "Still failing: $RUN_URL (upstream digest: ${{ needs.build.outputs.upstream_digest || 'n/a' }})"
+          else
+            gh issue create --repo "${{ github.repository }}" \
+              --title "$TITLE" --body "$BODY" --label bug
+          fi
