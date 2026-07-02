@@ -1,0 +1,6 @@
+# Shell scripts and workflow files must stay LF — they're COPY'd into a
+# Linux image / parsed by CI. CRLF in the entrypoint = /bin/sh^M failures.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.xml text eol=lf
