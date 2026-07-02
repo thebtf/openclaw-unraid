@@ -28,6 +28,13 @@ USER root
 COPY docker/unraid-entrypoint.sh /usr/local/bin/unraid-entrypoint.sh
 RUN chmod 755 /usr/local/bin/unraid-entrypoint.sh
 
+# mcporter: MCP-client CLI consumed by the bundled `mcporter` skill
+# (/app/skills/mcporter requires the `mcporter` bin). Baked into the image so
+# per-agent MCP servers (config/mcporter.json in each workspace) survive
+# container recreation — a runtime `npm i -g` lands in the overlay and is lost
+# on every image update.
+RUN npm install -g mcporter && mcporter --version
+
 # Keep upstream tini as PID 1; our script replaces only the CMD layer.
 ENTRYPOINT ["tini", "-s", "--", "/usr/local/bin/unraid-entrypoint.sh"]
 CMD []
