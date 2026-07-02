@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] — 2026-07-02
+
+### BREAKING (image + config-ownership change)
+
+- **Derived image.** The template now runs `ghcr.io/thebtf/openclaw-unraid:latest`
+  (FROM `ghcr.io/openclaw/openclaw`) instead of the vanilla upstream image.
+  The v1.x base64 bootstrap blob in `<PostArgs>` and the
+  `--user root --entrypoint /bin/sh` overrides in `<ExtraParams>` are GONE —
+  the same logic now lives in the image as a reviewable, versioned
+  entrypoint (`docker/unraid-entrypoint.sh`). Built by CI
+  (`.github/workflows/build-image.yml`): rebuilds on template push and on a
+  daily upstream-digest check.
+- **Config seeding is first-boot-only.** v1.x re-applied
+  `models.providers.custom` and `agents.list` from `CUSTOM_LLM_*` env on
+  EVERY start. Once extra agents exist in `openclaw.json` (Control UI,
+  CLI, external tooling), openclaw 2026.6+ refuses the destructive replace
+  ("Refusing to replace agents.list; it would remove existing entries") and
+  the container restart-loops. Now: gateway/logging scalars are managed
+  every start (idempotent); the LLM provider + main agent are seeded ONCE,
+  behind the `.unraid-template-seeded` marker in the data dir, and always
+  with `config set --merge` (merge-by-id — existing entries survive).
+  After first boot, `openclaw.json` is the single source of truth; to
+  re-seed deliberately, delete the marker and restart.
+- **`openclaw config set` runs under PUID, not root.** Kills the
+  post-set re-chown dance and the spurious "suspicious ownership" plugin
+  warnings during bootstrap (the ownership check compares against the
+  process uid; root never matches user-owned plugin dirs).
+
+### Migration for existing installs
+
+1. Update the template (`update-on-unraid.sh` or manual re-add) — the
+   merge preserves your values; Repository/ExtraParams come from upstream.
+2. Apply. First start creates `.unraid-template-seeded`; your existing
+   provider/agents merge intact via `--merge`.
+3. `CUSTOM_LLM_*` fields keep working as *first-boot* defaults; they no
+   longer overwrite config on every restart.
+
+### Why
+
+The v1.x design had two owners for one file: the template (env, every
+start) and the runtime (Control UI/CLI). The 2026-07-02 restart-loop on a
+multi-agent install was the direct consequence. Splitting "permissions
+every start" from "config seed once" removes the conflict class entirely;
+the derived image removes the unreviewable base64 transport.
+
 ## [1.1.9] — 2026-05-01
 
 Rename Config Path → OpenClaw Data, fix Workspace mount to match upstream sub-mount pattern.

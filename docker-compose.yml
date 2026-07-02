@@ -1,48 +1,53 @@
-version: "3.8"
+# openclaw-unraid via the derived image (non-Unraid / generic Docker hosts).
+# Mirrors the Unraid template: PUID/PGID ownership + first-boot config seeding
+# are handled by the image's entrypoint (docker/unraid-entrypoint.sh).
+# No user/entrypoint overrides needed — the image owns them.
 
 services:
   openclaw:
-    image: ghcr.io/openclaw/openclaw:latest
+    image: ghcr.io/thebtf/openclaw-unraid:latest
     container_name: openclaw
     hostname: OpenClaw
     restart: unless-stopped
-    user: root
 
     ports:
       - "18789:18789"
 
     volumes:
-      # Config and state (openclaw.json, sessions, credentials)
-      - ./config:/root/.openclaw:rw
-      # Agent workspace (SOUL.md, MEMORY.md, projects)
-      - ./workspace:/home/node/clawd:rw
-      # Homebrew packages (persists brew/go/npm installs)
+      # OpenClaw home -- config, sessions, plugins, media, credentials
+      - ./data:/home/node/.openclaw:rw
+      # Agent workspace (AGENTS.md, SOUL.md, memory, skills) -- sub-mount
+      - ./workspace:/home/node/.openclaw/workspace:rw
+      # Homebrew packages (persists brew installs; optional)
       - ./homebrew:/home/linuxbrew/.linuxbrew:rw
-      # ~/.local persistence: pip --user installs, manually-built CLIs in bin/, libs in lib/
-      - ./local:/root/.local:rw
-      # Gateway logs (kept out of the container overlay fs).
-      # OpenClaw always writes to /tmp/openclaw regardless of logging.file (see issue #61295),
-      # so we mount /tmp/openclaw directly.
+      # ~/.local persistence: pip --user installs, manually-built CLIs
+      - ./local:/home/node/.local:rw
+      # Gateway logs (logging.file pinned to /tmp/openclaw/openclaw.log)
       - ./logs:/tmp/openclaw:rw
-      # Bootstrap script (idempotent merge via `openclaw config set`)
-      - ./scripts/bootstrap.sh:/usr/local/lib/openclaw-bootstrap.sh:ro
 
     environment:
       - TZ=${TZ:-UTC}
+      # Host uid/gid that should own files in the mounts above
+      - PUID=${PUID:-1000}
+      - PGID=${PGID:-1000}
       # REQUIRED
       - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:?Gateway token required}
       # REQUIRED since OpenClaw 2026.2: comma-separated browser origins for the Control UI.
       # Example: http://192.168.1.41:18789  or  http://192.168.1.41:18789,http://openclaw.local:18789
       - OPENCLAW_ALLOWED_ORIGINS=${OPENCLAW_ALLOWED_ORIGINS:?Allowed origins required (e.g. http://YOUR-IP:18789)}
-      # Custom LLM endpoint (optional) -- LiteLLM, vLLM, Ollama, OpenRouter proxy, etc.
+      # Custom LLM endpoint (optional; FIRST-BOOT seed only — after that
+      # openclaw.json owns the config, see CHANGELOG v2.0.0)
       - CUSTOM_LLM_BASE_URL=${CUSTOM_LLM_BASE_URL:-}
       - CUSTOM_LLM_API_KEY=${CUSTOM_LLM_API_KEY:-}
       - CUSTOM_LLM_API_TYPE=${CUSTOM_LLM_API_TYPE:-openai-completions}
       - CUSTOM_LLM_MODEL_ID=${CUSTOM_LLM_MODEL_ID:-}
+      - CUSTOM_LLM_CONTEXT_WINDOW=${CUSTOM_LLM_CONTEXT_WINDOW:-128000}
+      - CUSTOM_LLM_MAX_TOKENS=${CUSTOM_LLM_MAX_TOKENS:-32000}
+      - CUSTOM_LLM_REASONING=${CUSTOM_LLM_REASONING:-1}
       # Control UI device-auth toggle (default true for LAN/homelab over plain HTTP)
       - OPENCLAW_DISABLE_DEVICE_AUTH=${OPENCLAW_DISABLE_DEVICE_AUTH:-true}
-      # Log rotation tuning (only maxFileBytes is in the schema; archive count is hardcoded to 5)
-      - OPENCLAW_LOG_MAX_FILE_BYTES=${OPENCLAW_LOG_MAX_FILE_BYTES:-26214400}
+      # Log rotation tuning (archive count is hardcoded to 5 in openclaw)
+      - OPENCLAW_LOG_MAX_FILE_BYTES=${OPENCLAW_LOG_MAX_FILE_BYTES:-104857600}
       # Built-in LLM providers (use one of these OR Custom LLM Base URL)
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
@@ -56,11 +61,7 @@ services:
       - DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
       # System PATH including ~/.local/bin, Homebrew, Bun, Cargo
-      - PATH=/root/.local/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/root/.bun/bin:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-    # Bootstrap script lives at scripts/bootstrap.sh -- mounted read-only into the container.
-    # Idempotent: re-runs every start, merges managed fields via `openclaw config set`.
-    entrypoint: ["/bin/sh", "/usr/local/lib/openclaw-bootstrap.sh"]
+      - PATH=/home/node/.local/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.bun/bin:/home/node/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
     logging:
       driver: json-file
@@ -73,12 +74,15 @@ services:
 # ==============================================================================
 #
 # 1. Create .env file:
+#    PUID=1000
+#    PGID=1000
 #    OPENCLAW_GATEWAY_TOKEN=your-secret-token
 #    OPENCLAW_ALLOWED_ORIGINS=http://localhost:18789
-#    ANTHROPIC_API_KEY=sk-ant-...        # OR use a custom router below:
+#    ANTHROPIC_API_KEY=sk-ant-...        # OR use a custom router:
 #    # CUSTOM_LLM_BASE_URL=http://litellm:4000/v1
 #    # CUSTOM_LLM_API_KEY=sk-...
 #    # CUSTOM_LLM_API_TYPE=openai-completions
+#    # CUSTOM_LLM_MODEL_ID=gpt-5.5
 #
 # 2. Start:
 #    docker compose up -d
@@ -86,7 +90,9 @@ services:
 # 3. Access Control UI:
 #    http://localhost:18789/?token=YOUR_TOKEN
 #
-# NOTE: First start takes ~60 seconds while Homebrew installs.
-#       Subsequent starts are fast (Homebrew persists in the volume).
+# CONFIG OWNERSHIP: CUSTOM_LLM_* env seeds openclaw.json on FIRST boot only
+# (marker: data/.unraid-template-seeded). After that, edit config via the
+# Control UI or `openclaw config set` -- env changes no longer overwrite it.
+# To re-seed: delete the marker file and restart.
 #
 # ==============================================================================

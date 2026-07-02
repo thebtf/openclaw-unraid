@@ -1,32 +1,42 @@
 #!/bin/sh
-# OpenClaw Unraid template bootstrap.
-# Embedded into openclaw.xml as base64 to bypass Unraid's PostArgs '<' / '>' stripping.
+# OpenClaw Unraid entrypoint (derived image).
 #
-# Two-phase model:
-#   PHASE 1 (root): usermod/groupmod node to PUID/PGID, one-shot chown of writable
-#                   bind-mounts ONLY when ownership doesn't match, then `openclaw
-#                   config set --batch-json` to apply managed config fields.
-#   PHASE 2 (PUID): exec gateway via `setpriv --reuid --regid --init-groups`.
+# v2.0.0 replacement for the v1.x base64-in-PostArgs bootstrap. Same
+# operational model, two structural fixes:
 #
-# Mount targets follow upstream image conventions: gateway runs as `node` user
-# whose HOME is /home/node. Config lives at $HOME/.openclaw (= /home/node/.openclaw),
-# matching the openclaw image expectation. No HOME hacks, no /root mount targets.
+#   1. TRANSPORT: lives in the image (reviewable, versioned with the image)
+#      instead of a base64 blob in the Unraid template. No --entrypoint or
+#      --user overrides in the template anymore.
+#   2. CONFIG OWNERSHIP SPLIT: permissions run every start (cheap,
+#      idempotent); LLM/agent config seeding runs ONCE on first boot
+#      (marker file) and always with `config set --merge`, so config
+#      changes made later via Control UI / CLI / external tooling are
+#      never clobbered. v1.x re-seeded agents.list on every start, which
+#      hard-fails once extra agents exist ("Refusing to replace
+#      agents.list") and restart-loops the container.
 #
-# No background loops, no recursive chown on a cron tick. Ownership is set ONCE
-# at startup, then enforced naturally because the gateway runs as PUID:PGID and
-# every file it creates inherits that ownership.
+# Phases:
+#   PHASE 1 (root):  usermod/groupmod node to PUID/PGID, one-shot chown of
+#                    writable bind-mounts when ownership doesn't match,
+#                    stale-lock cleanup.
+#   PHASE 2 (PUID):  managed gateway/logging keys every start; first-boot
+#                    LLM provider + agent seeding behind a marker. Runs
+#                    under PUID via setpriv so openclaw.json never becomes
+#                    root-owned and plugin ownership checks see the same
+#                    uid the gateway runs as.
+#   PHASE 3 (PUID):  exec gateway via setpriv.
 #
-# User edits to non-managed sections (channels, agents, cron, tools) made via
-# the Control UI are preserved across restarts (idempotent merge).
+# Ownership is set ONCE at startup, then holds naturally: the gateway runs
+# as PUID:PGID and every file it creates inherits that ownership. No
+# background loops, no recursive chown on a cron tick.
 
-set -e
+set -eu
 
 # --- PUID/PGID resolution (LinuxServer.io convention) ---
 # Defaults: 99/100 = nobody/users on Unraid. Override via template fields.
 PUID="${PUID:-99}"
 PGID="${PGID:-100}"
 
-# Validate numeric
 case "$PUID" in
   ''|*[!0-9]*) echo "[bootstrap] FATAL: PUID='$PUID' must be numeric." 1>&2; exit 1 ;;
 esac
@@ -34,10 +44,17 @@ case "$PGID" in
   ''|*[!0-9]*) echo "[bootstrap] FATAL: PGID='$PGID' must be numeric." 1>&2; exit 1 ;;
 esac
 
+# Everything below assumes we start as root (image sets USER root; the
+# template must NOT pass --user). Fail loud if someone overrode it.
+if [ "$(id -u)" != "0" ]; then
+  echo "[bootstrap] FATAL: entrypoint must start as root (got uid $(id -u)). Remove any --user override from the container settings; privileges are dropped to PUID:PGID internally." 1>&2
+  exit 1
+fi
+
 # --- Re-map the in-image `node` user to host UID/GID ---
-# `-o` (--non-unique) lets us use a UID/GID that may collide with another
-# system user/group (e.g. GID 100 = `users` group already exists on Debian).
-# This is the same approach used by linuxserver.io images.
+# `-o` (--non-unique) allows collisions with existing system users/groups
+# (e.g. GID 100 = `users` already exists on Debian). linuxserver.io does
+# the same.
 CURRENT_UID=$(id -u node 2>/dev/null || echo 1000)
 CURRENT_GID=$(id -g node 2>/dev/null || echo 1000)
 
@@ -58,22 +75,13 @@ if [ "$CURRENT_GID" != "$PGID" ]; then
   fi
 fi
 
-# When the node user's UID/GID is remapped, files in the image that were owned
-# by the OLD UID/GID (typically /app, /app/node_modules, /home/node) become
-# orphaned. The remapped node user can no longer read/write them, so the
-# gateway crashes during runtime-deps install or auth phase.
+# After a UID/GID remap, image files owned by the OLD ids (/app,
+# /app/node_modules, /home/node) become orphaned and the gateway crashes
+# on runtime-deps install or auth. Re-align them once per remap.
 #
-# Chown those paths to the new UID/GID. This is the same pattern linuxserver.io
-# images use in their s6-overlay init scripts. Runs ONLY when remap actually
-# happened (UID_CHANGED=1 or GID_CHANGED=1) -- subsequent starts skip this.
-#
-# Override: set OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 to skip the /app and /home/node
-# chown sweep entirely. Useful once the image filesystem is already aligned
-# (e.g. a previous start completed it) and you want subsequent Apply cycles to
-# finish in seconds instead of minutes spent rescanning /app/node_modules.
-# WARNING: if Unraid recreated the container (Docker rm + create) the image
-# overlay is fresh, /app is back to UID 1000, and gateway will fail. In that
-# case un-set the skip and let bootstrap re-align once.
+# OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 skips the sweep (fast Apply cycles on
+# an already-aligned overlay). WARNING: if Unraid recreates the container
+# the overlay is fresh (/app back to UID 1000) — unset the skip once.
 if [ "${OPENCLAW_SKIP_SYSTEM_PATH_REMAP:-0}" = "1" ]; then
   echo "[bootstrap] OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1, skipping /home/node and /app chown sweep"
 else
@@ -99,28 +107,20 @@ else
 fi
 
 # --- Ensure required directories exist ---
-# All paths under /home/node/* match upstream image conventions. The gateway runs
-# as `node` user whose HOME is /home/node (per /etc/passwd from the image build).
+# Paths follow upstream image conventions: gateway runs as `node`, HOME is
+# /home/node, config at $HOME/.openclaw.
 mkdir -p /home/node/.openclaw /home/node/.openclaw/workspace /home/node/.local /tmp/openclaw
 
 CFG=/home/node/.openclaw/openclaw.json
+SEED_MARKER=/home/node/.openclaw/.unraid-template-seeded
 
 # --- One-shot ownership alignment (only when mismatch detected) ---
-# Runs ONCE at container start. The gateway is then exec'd under PUID:PGID,
-# so every file it creates is naturally owned PUID:PGID -- no loop needed.
-#
-# Override: set OPENCLAW_SKIP_OWNERSHIP_INIT=1 to skip this step entirely
-# (useful if you manage ownership externally, e.g. via Unraid User Scripts).
-# Two tiers of perm dirs:
-#   DEEP_PERM_DIRS — small, openclaw-managed, must be fully consistent. Recursive
-#     scan: chown -R if ANY file inside has wrong owner. Catches files left over
-#     from previous template versions (e.g. devices/paired.json owned by root
-#     because v1.1.0-1.1.3 wrote it as root before we switched to PUID/PGID).
-#     /home/node/.openclaw is small (a few MB), recursive scan is fast.
-#   SHALLOW_PERM_DIRS — potentially large (workspace, log archive, local pip
-#     installs). Recursive find on a 100k-file tree is the chown-loop death
-#     spiral we already escaped. Only check the mount root: if it matches PUID,
-#     trust that the gateway (which runs as PUID) wrote everything correctly.
+# DEEP_PERM_DIRS: small openclaw-managed trees, recursive scan (catches
+# root-owned leftovers from old template versions).
+# SHALLOW_PERM_DIRS: potentially huge (workspace, logs, pip installs) —
+# check only the mount root; the gateway runs as PUID and keeps the rest
+# consistent. Recursive find on a 100k-file tree is the chown-loop death
+# spiral v1.1.1 already escaped.
 DEEP_PERM_DIRS="/home/node/.openclaw"
 SHALLOW_PERM_DIRS="/home/node/.openclaw/workspace /home/node/.local /tmp/openclaw /home/linuxbrew /projects"
 
@@ -151,14 +151,10 @@ else
 fi
 
 # --- Clean up stale plugin-runtime-deps locks ---
-# OpenClaw uses a filesystem lock to serialize bundled-deps mirroring across
-# parallel gateway processes. Lock dir contains owner.json with the holder PID.
-# When a previous container crash leaves the lock behind, the next start waits
-# 5 minutes for the lock and then exits with SECRETS_RELOADER_DEGRADED, looping.
-#
-# Detect stale locks: owner.json says pid=N, but no such process is alive in
-# our pid namespace -> nuke the lock dir. Safe because we run inside a single
-# container, no other gateway can hold a live lock here.
+# A crashed container can leave the bundled-deps mirror lock behind; the
+# next start waits 5 minutes and dies with SECRETS_RELOADER_DEGRADED,
+# looping. owner.json carries the holder PID — if it's not alive in our
+# namespace, the lock is stale. Safe: single container, no other gateway.
 LOCKS_GLOB=/home/node/.openclaw/plugin-runtime-deps/*/.openclaw-runtime-mirror.lock
 for lock_dir in $LOCKS_GLOB; do
   [ -d "$lock_dir" ] || continue
@@ -168,7 +164,6 @@ for lock_dir in $LOCKS_GLOB; do
     rm -rf "$lock_dir" 2>/dev/null || true
     continue
   fi
-  # Extract pid (sed beats jq dependency: owner.json is small and stable)
   owner_pid=$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' "$owner_file" | head -1)
   if [ -z "$owner_pid" ] || [ ! -d "/proc/$owner_pid" ]; then
     echo "[bootstrap] removing stale lock (owner pid=$owner_pid not alive): $lock_dir"
@@ -177,12 +172,12 @@ for lock_dir in $LOCKS_GLOB; do
 done
 
 # --- Validate required env ---
-if [ -z "$OPENCLAW_ALLOWED_ORIGINS" ]; then
+if [ -z "${OPENCLAW_ALLOWED_ORIGINS:-}" ]; then
   echo "[bootstrap] FATAL: OPENCLAW_ALLOWED_ORIGINS is required (e.g. http://192.168.1.41:18789)." 1>&2
   exit 1
 fi
 
-if [ -n "$CUSTOM_LLM_BASE_URL" ]; then
+if [ -n "${CUSTOM_LLM_BASE_URL:-}" ]; then
   API_TYPE="${CUSTOM_LLM_API_TYPE:-openai-completions}"
   case "$API_TYPE" in
     openai-completions|openai-responses|openai-codex-responses|anthropic-messages|google-generative-ai|github-copilot|bedrock-converse-stream|ollama|azure-openai-responses)
@@ -193,13 +188,12 @@ if [ -n "$CUSTOM_LLM_BASE_URL" ]; then
       exit 1
       ;;
   esac
-  if [ -z "$CUSTOM_LLM_MODEL_ID" ]; then
-    echo "[bootstrap] FATAL: CUSTOM_LLM_MODEL_ID is required when CUSTOM_LLM_BASE_URL is set (e.g. gpt-5.5, llama-3.1-70b, claude-3-opus). Comma-separated for multiple." 1>&2
+  if [ -z "${CUSTOM_LLM_MODEL_ID:-}" ]; then
+    echo "[bootstrap] FATAL: CUSTOM_LLM_MODEL_ID is required when CUSTOM_LLM_BASE_URL is set (e.g. gpt-5.5, llama-3.1-70b). Comma-separated for multiple." 1>&2
     exit 1
   fi
 fi
 
-# Normalize boolean env (true/1/yes -> true, anything else -> false)
 to_bool() {
   case "$1" in
     1|true|TRUE|True|yes|YES|Yes|on|ON|On) echo "true" ;;
@@ -225,9 +219,6 @@ csv_to_json_strings() {
   }'
 }
 
-# CSV of model ids -> JSON array of model objects, including reasoning flag.
-# Context window and max output tokens come from env so users can match their
-# actual model parameters.
 csv_to_model_objects() {
   CTX="${CUSTOM_LLM_CONTEXT_WINDOW:-128000}"
   MAX="${CUSTOM_LLM_MAX_TOKENS:-32000}"
@@ -255,7 +246,19 @@ if [ ! -s "$CFG" ]; then
   echo "[bootstrap] created empty $CFG"
 fi
 
-# --- Build batch-json for `openclaw config set` ---
+# Run openclaw CLI as PUID (not root): config path resolves via HOME, the
+# rewritten openclaw.json keeps PUID ownership (no re-chown dance), and
+# plugin-discovery ownership checks evaluate against the same uid the
+# gateway will run as.
+run_as_puid() {
+  setpriv --reuid="$PUID" --regid="$PGID" --init-groups \
+    env HOME=/home/node PATH="$PATH" "$@"
+}
+
+# --- MANAGED KEYS (every start, scalars only — idempotent, never destructive) ---
+# These are the template-owned gateway/logging fields. Deliberately NO
+# agents.list, NO models.providers here: those are seeded once below and
+# then owned by the runtime (Control UI / CLI / external config tooling).
 BATCH='['
 BATCH="$BATCH{\"path\":\"gateway.mode\",\"value\":\"local\"}"
 BATCH="$BATCH,{\"path\":\"gateway.bind\",\"value\":\"lan\"}"
@@ -263,59 +266,55 @@ BATCH="$BATCH,{\"path\":\"gateway.controlUi.allowInsecureAuth\",\"value\":true}"
 BATCH="$BATCH,{\"path\":\"gateway.controlUi.dangerouslyDisableDeviceAuth\",\"value\":$DISABLE_DEVICE_AUTH}"
 BATCH="$BATCH,{\"path\":\"gateway.controlUi.allowedOrigins\",\"value\":[$ORIGINS_JSON]}"
 BATCH="$BATCH,{\"path\":\"gateway.auth.mode\",\"value\":\"token\"}"
-
-# Logging: openclaw 2026.4 namespaces by gateway instance ("/tmp/openclaw-0/" not
-# "/tmp/openclaw/"), so we pin logging.file explicitly to a stable path inside
-# our mounted /tmp/openclaw to keep logs on the host volume. logging.file works
-# again as of openclaw 2026.4+ (issue #61295 closed).
 LOG_MAX_BYTES="${OPENCLAW_LOG_MAX_FILE_BYTES:-104857600}"
 BATCH="$BATCH,{\"path\":\"logging.maxFileBytes\",\"value\":$LOG_MAX_BYTES}"
 BATCH="$BATCH,{\"path\":\"logging.file\",\"value\":\"/tmp/openclaw/openclaw.log\"}"
-
-if [ -n "$CUSTOM_LLM_BASE_URL" ]; then
-  BASE_URL=$(echo "$CUSTOM_LLM_BASE_URL" | sed 's:/*$::')
-  MODELS_JSON=$(csv_to_model_objects "$CUSTOM_LLM_MODEL_ID")
-  CUSTOM_PROVIDER="{\"baseUrl\":\"$BASE_URL\",\"apiKey\":\"\${CUSTOM_LLM_API_KEY}\",\"api\":\"$API_TYPE\",\"models\":[$MODELS_JSON]}"
-  BATCH="$BATCH,{\"path\":\"models.mode\",\"value\":\"merge\"}"
-  BATCH="$BATCH,{\"path\":\"models.providers.custom\",\"value\":$CUSTOM_PROVIDER}"
-
-  # Pin agent primary model to the first custom model so plugin auto-enable
-  # doesn't silently swap primary to a different namespace (e.g. openai/gpt-5.5
-  # when the openai-image plugin auto-enables and creates models.providers.openai
-  # with the same model id but default contextWindow=200000 from the openai
-  # namespace, ignoring our custom provider's contextWindow=1050000).
-  PRIMARY_MODEL=$(echo "$CUSTOM_LLM_MODEL_ID" | awk -F, '{
-    v=$1; gsub(/^[ \t]+|[ \t]+$/, "", v); print v
-  }')
-  BATCH="$BATCH,{\"path\":\"agents.list\",\"value\":[{\"id\":\"main\",\"model\":\"custom/$PRIMARY_MODEL\"}]}"
-fi
-
 BATCH="$BATCH]"
 
-# --- Apply via openclaw native CLI (handles merge + schema validation) ---
-echo "[bootstrap] applying config via openclaw config set"
-# `openclaw config set` resolves the config path via `os.userInfo().homedir`
-# under the EUID it's running as. We're root here, so it would target
-# /root/.openclaw/openclaw.json -- but our mount is /home/node/.openclaw.
-# Pass HOME=/home/node explicitly so config set writes to the right place.
-if ! HOME=/home/node node dist/index.js config set --batch-json "$BATCH"; then
-  echo "[bootstrap] FATAL: openclaw rejected the config update. See errors above." 1>&2
-  echo "[bootstrap] batch-json was:" 1>&2
-  echo "$BATCH" 1>&2
+echo "[bootstrap] applying managed gateway/logging keys"
+if ! run_as_puid node /app/dist/index.js config set --batch-json "$BATCH"; then
+  echo "[bootstrap] FATAL: openclaw rejected the managed-keys update. See errors above." 1>&2
   exit 1
 fi
 
-# Re-chown openclaw.json after config set rewrites it (atomic-write pattern
-# replaces inode; fresh inode inherits root because we're still root here).
-chown "$PUID:$PGID" "$CFG" 2>/dev/null || true
+# --- FIRST-BOOT SEEDING (once, marker-gated, merge-only) ---
+# Seeds the custom LLM provider and the main agent from template env on the
+# FIRST start only. After that the config file is the single source of
+# truth; template env changes to CUSTOM_LLM_* no longer overwrite it.
+# To re-seed deliberately: delete .unraid-template-seeded and restart.
+if [ -n "${CUSTOM_LLM_BASE_URL:-}" ]; then
+  if [ -f "$SEED_MARKER" ]; then
+    echo "[bootstrap] LLM/agent config already seeded ($(cat "$SEED_MARKER" 2>/dev/null || echo unknown)); config file is source of truth. Delete $SEED_MARKER to re-seed."
+  else
+    BASE_URL=$(echo "$CUSTOM_LLM_BASE_URL" | sed 's:/*$::')
+    MODELS_JSON=$(csv_to_model_objects "$CUSTOM_LLM_MODEL_ID")
+    CUSTOM_PROVIDER="{\"baseUrl\":\"$BASE_URL\",\"apiKey\":\"\${CUSTOM_LLM_API_KEY}\",\"api\":\"$API_TYPE\",\"models\":[$MODELS_JSON]}"
+    PRIMARY_MODEL=$(echo "$CUSTOM_LLM_MODEL_ID" | awk -F, '{
+      v=$1; gsub(/^[ \t]+|[ \t]+$/, "", v); print v
+    }')
+    SEED_BATCH="[{\"path\":\"models.mode\",\"value\":\"merge\"}"
+    SEED_BATCH="$SEED_BATCH,{\"path\":\"models.providers.custom\",\"value\":$CUSTOM_PROVIDER}"
+    SEED_BATCH="$SEED_BATCH,{\"path\":\"agents.list\",\"value\":[{\"id\":\"main\",\"model\":\"custom/$PRIMARY_MODEL\"}]}"
+    SEED_BATCH="$SEED_BATCH]"
 
-echo "[bootstrap] config applied: origins=[$ORIGINS_JSON], disableDeviceAuth=$DISABLE_DEVICE_AUTH, logMaxBytes=$LOG_MAX_BYTES${CUSTOM_LLM_BASE_URL:+, custom LLM=$BASE_URL ($API_TYPE), models=[$CUSTOM_LLM_MODEL_ID], reasoning=$CUSTOM_LLM_REASONING, primary=custom/$PRIMARY_MODEL}"
+    echo "[bootstrap] first boot: seeding custom LLM provider + main agent (merge)"
+    # --merge: merge-by-id on protected arrays (agents.list, provider
+    # models). Existing entries survive; ours are added/updated. This is
+    # what makes re-seeding after marker deletion safe too.
+    if ! run_as_puid node /app/dist/index.js config set --merge --batch-json "$SEED_BATCH"; then
+      echo "[bootstrap] FATAL: openclaw rejected the first-boot seed. See errors above." 1>&2
+      echo "[bootstrap] batch-json was:" 1>&2
+      echo "$SEED_BATCH" 1>&2
+      exit 1
+    fi
+    date -u +"%Y-%m-%dT%H:%M:%SZ" > "$SEED_MARKER"
+    chown "$PUID:$PGID" "$SEED_MARKER" 2>/dev/null || true
+    echo "[bootstrap] seeded: custom LLM=$BASE_URL ($API_TYPE), models=[$CUSTOM_LLM_MODEL_ID], primary=custom/$PRIMARY_MODEL"
+  fi
+fi
 
 # --- Drop privileges and exec gateway ---
-# `setpriv --init-groups` reads supplementary groups for the new UID from /etc/group.
-# HOME is left to /etc/passwd default for `node` (= /home/node), matching where
-# the Config Path mount lands. No HOME override needed.
 echo "[bootstrap] dropping privileges to $PUID:$PGID and starting gateway"
 exec setpriv --reuid="$PUID" --regid="$PGID" --init-groups \
   env HOME=/home/node PATH="$PATH" \
-  node dist/index.js gateway --bind lan
+  node /app/dist/index.js gateway --bind lan
