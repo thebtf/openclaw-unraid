@@ -259,6 +259,8 @@ run_as_puid() {
 # These are the template-owned gateway/logging fields. Deliberately NO
 # agents.list, NO models.providers here: those are seeded once below and
 # then owned by the runtime (Control UI / CLI / external config tooling).
+# `models.mode` is also a scalar, so set it here (plain set), not in the
+# merge batch below — `config set --merge` rightfully rejects scalar merges.
 BATCH='['
 BATCH="$BATCH{\"path\":\"gateway.mode\",\"value\":\"local\"}"
 BATCH="$BATCH,{\"path\":\"gateway.bind\",\"value\":\"lan\"}"
@@ -266,6 +268,9 @@ BATCH="$BATCH,{\"path\":\"gateway.controlUi.allowInsecureAuth\",\"value\":true}"
 BATCH="$BATCH,{\"path\":\"gateway.controlUi.dangerouslyDisableDeviceAuth\",\"value\":$DISABLE_DEVICE_AUTH}"
 BATCH="$BATCH,{\"path\":\"gateway.controlUi.allowedOrigins\",\"value\":[$ORIGINS_JSON]}"
 BATCH="$BATCH,{\"path\":\"gateway.auth.mode\",\"value\":\"token\"}"
+if [ -n "${CUSTOM_LLM_BASE_URL:-}" ]; then
+  BATCH="$BATCH,{\"path\":\"models.mode\",\"value\":\"merge\"}"
+fi
 LOG_MAX_BYTES="${OPENCLAW_LOG_MAX_FILE_BYTES:-104857600}"
 BATCH="$BATCH,{\"path\":\"logging.maxFileBytes\",\"value\":$LOG_MAX_BYTES}"
 BATCH="$BATCH,{\"path\":\"logging.file\",\"value\":\"/tmp/openclaw/openclaw.log\"}"
@@ -292,8 +297,7 @@ if [ -n "${CUSTOM_LLM_BASE_URL:-}" ]; then
     PRIMARY_MODEL=$(echo "$CUSTOM_LLM_MODEL_ID" | awk -F, '{
       v=$1; gsub(/^[ \t]+|[ \t]+$/, "", v); print v
     }')
-    SEED_BATCH="[{\"path\":\"models.mode\",\"value\":\"merge\"}"
-    SEED_BATCH="$SEED_BATCH,{\"path\":\"models.providers.custom\",\"value\":$CUSTOM_PROVIDER}"
+    SEED_BATCH="[{\"path\":\"models.providers.custom\",\"value\":$CUSTOM_PROVIDER}"
     SEED_BATCH="$SEED_BATCH,{\"path\":\"agents.list\",\"value\":[{\"id\":\"main\",\"model\":\"custom/$PRIMARY_MODEL\"}]}"
     SEED_BATCH="$SEED_BATCH]"
 
