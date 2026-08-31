@@ -11,9 +11,9 @@ name: build-image
 # The smoke gate boots the freshly built image with a throwaway config and
 # requires the bootstrap to reach the gateway phase; a broken upstream
 # change therefore never reaches :latest (deployments keep running the
-# previous image). Any failure files/updates a "rebuild failed" issue in
-# this repo, which also produces an email through normal issue
-# notifications on top of the standard Actions failure email.
+# previous image). When repository Issues are enabled, a failure also files or
+# updates a deduplicated "rebuild failed" issue; otherwise standard Actions
+# failure notification email remains available.
 
 on:
   push:
@@ -134,7 +134,7 @@ jobs:
           # Bootstrap must reach the gateway exec line, and the container
           # must still be alive (not crash-looped) shortly after.
           ok=""
-          for i in $(seq 1 24); do
+          for _ in $(seq 1 24); do
             if docker logs smoke 2>&1 | grep -q "dropping privileges to 1234:1000 and starting gateway"; then
               ok=1; break
             fi
@@ -178,13 +178,13 @@ jobs:
             ${{ env.DERIVED_IMAGE }}:latest
             ${{ steps.tag.outputs.tag != 'latest' && format('{0}:{1}', env.DERIVED_IMAGE, steps.tag.outputs.tag) || '' }}
 
-  # FAILURE REGISTRATION: file (or update) an issue so the break is recorded
-  # in the repo and produces an email via issue notifications. Deduplicated
-  # by title — one open issue per break, follow-up failures add comments.
+  # FAILURE REGISTRATION: when Issues are enabled, file (or update) a
+  # deduplicated issue. Standard Actions failure notification email remains
+  # available regardless; follow-up failures add comments to the open issue.
   on-failure:
     runs-on: ubuntu-latest
     needs: [build]
-    if: failure()
+    if: failure() && github.event.repository.has_issues
     permissions:
       issues: write
     steps:

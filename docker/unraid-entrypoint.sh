@@ -200,7 +200,6 @@ to_bool() {
     *) echo "false" ;;
   esac
 }
-DISABLE_DEVICE_AUTH=$(to_bool "${OPENCLAW_DISABLE_DEVICE_AUTH:-true}")
 CUSTOM_LLM_REASONING=$(to_bool "${CUSTOM_LLM_REASONING:-true}")
 
 # --- CSV -> JSON helpers ---
@@ -264,8 +263,6 @@ run_as_puid() {
 BATCH='['
 BATCH="$BATCH{\"path\":\"gateway.mode\",\"value\":\"local\"}"
 BATCH="$BATCH,{\"path\":\"gateway.bind\",\"value\":\"lan\"}"
-BATCH="$BATCH,{\"path\":\"gateway.controlUi.allowInsecureAuth\",\"value\":true}"
-BATCH="$BATCH,{\"path\":\"gateway.controlUi.dangerouslyDisableDeviceAuth\",\"value\":$DISABLE_DEVICE_AUTH}"
 BATCH="$BATCH,{\"path\":\"gateway.controlUi.allowedOrigins\",\"value\":[$ORIGINS_JSON]}"
 BATCH="$BATCH,{\"path\":\"gateway.auth.mode\",\"value\":\"token\"}"
 if [ -n "${CUSTOM_LLM_BASE_URL:-}" ]; then
@@ -282,11 +279,12 @@ if ! run_as_puid node /app/dist/index.js config set --batch-json "$BATCH"; then
   exit 1
 fi
 
-# --- FIRST-BOOT SEEDING (once, marker-gated, merge-only) ---
+# --- FIRST-BOOT SEEDING (once, marker-gated, collection-preserving) ---
 # Seeds the custom LLM provider and the main agent from template env on the
 # FIRST start only. After that the config file is the single source of
 # truth; template env changes to CUSTOM_LLM_* no longer overwrite it.
-# To re-seed deliberately: delete .unraid-template-seeded and restart.
+# Deliberately deleting the marker refreshes provider baseUrl, apiKey, and
+# api from template env while preserving existing agent entries and model IDs.
 if [ -n "${CUSTOM_LLM_BASE_URL:-}" ]; then
   if [ -f "$SEED_MARKER" ]; then
     echo "[bootstrap] LLM/agent config already seeded ($(cat "$SEED_MARKER" 2>/dev/null || echo unknown)); config file is source of truth. Delete $SEED_MARKER to re-seed."
@@ -297,18 +295,43 @@ if [ -n "${CUSTOM_LLM_BASE_URL:-}" ]; then
     PRIMARY_MODEL=$(echo "$CUSTOM_LLM_MODEL_ID" | awk -F, '{
       v=$1; gsub(/^[ \t]+|[ \t]+$/, "", v); print v
     }')
-    SEED_BATCH="[{\"path\":\"models.providers.custom\",\"value\":$CUSTOM_PROVIDER}"
-    SEED_BATCH="$SEED_BATCH,{\"path\":\"agents.list\",\"value\":[{\"id\":\"main\",\"model\":\"custom/$PRIMARY_MODEL\"}]}"
-    SEED_BATCH="$SEED_BATCH]"
 
-    echo "[bootstrap] first boot: seeding custom LLM provider + main agent (merge)"
-    # --merge: merge-by-id on protected arrays (agents.list, provider
-    # models). Existing entries survive; ours are added/updated. This is
-    # what makes re-seeding after marker deletion safe too.
-    if ! run_as_puid node /app/dist/index.js config set --merge --batch-json "$SEED_BATCH"; then
-      echo "[bootstrap] FATAL: openclaw rejected the first-boot seed. See errors above." 1>&2
-      echo "[bootstrap] batch-json was:" 1>&2
-      echo "$SEED_BATCH" 1>&2
+    # A missing provider can be created as one complete object. Existing
+    # providers must retain their model IDs, so merge only models and write
+    # provider scalar leaves separately.
+    if run_as_puid node -e 'try { const fs = require("fs"); const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.exit(config.models?.providers?.custom ? 0 : 1); } catch (error) { console.error(error.message); process.exit(2); }' "$CFG"; then
+      MODELS_BATCH="[{\"path\":\"models.providers.custom.models\",\"value\":[$MODELS_JSON]}]"
+      PROVIDER_SCALARS_BATCH="[{\"path\":\"models.providers.custom.baseUrl\",\"value\":\"$BASE_URL\"},{\"path\":\"models.providers.custom.apiKey\",\"value\":\"\${CUSTOM_LLM_API_KEY}\"},{\"path\":\"models.providers.custom.api\",\"value\":\"$API_TYPE\"}]"
+
+      echo "[bootstrap] first boot: merging custom LLM models and updating provider settings"
+      if ! run_as_puid node /app/dist/index.js config set --merge --batch-json "$MODELS_BATCH" || \
+         ! run_as_puid node /app/dist/index.js config set --batch-json "$PROVIDER_SCALARS_BATCH"; then
+        echo "[bootstrap] FATAL: openclaw rejected the custom-provider seed. See errors above." 1>&2
+        exit 1
+      fi
+    else
+      provider_status=$?
+      case "$provider_status" in
+        1)
+          PROVIDER_BATCH="[{\"path\":\"models.providers.custom\",\"value\":$CUSTOM_PROVIDER}]"
+          echo "[bootstrap] first boot: creating custom LLM provider"
+          if ! run_as_puid node /app/dist/index.js config set --batch-json "$PROVIDER_BATCH"; then
+            echo "[bootstrap] FATAL: openclaw rejected the custom-provider seed. See errors above." 1>&2
+            exit 1
+          fi
+          ;;
+        *)
+          echo "[bootstrap] FATAL: could not read or parse $CFG while inspecting the existing custom provider." 1>&2
+          exit 1
+          ;;
+      esac
+    fi
+
+
+    AGENT_BATCH="[{\"path\":\"agents.entries.main.model\",\"value\":\"custom/$PRIMARY_MODEL\"}]"
+    echo "[bootstrap] first boot: setting main agent model"
+    if ! run_as_puid node /app/dist/index.js config set --batch-json "$AGENT_BATCH"; then
+      echo "[bootstrap] FATAL: openclaw rejected the main-agent seed. See errors above." 1>&2
       exit 1
     fi
     date -u +"%Y-%m-%dT%H:%M:%SZ" > "$SEED_MARKER"

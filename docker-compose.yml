@@ -26,6 +26,13 @@ services:
       - ./logs:/tmp/openclaw:rw
 
     environment:
+      # Canonical image runtime paths; fixed values, not host-tunable inputs.
+      - HOME=/home/node
+      - OPENCLAW_HOME=/home/node
+      - OPENCLAW_STATE_DIR=/home/node/.openclaw
+      - OPENCLAW_CONFIG_PATH=/home/node/.openclaw/openclaw.json
+      - OPENCLAW_CONFIG_DIR=/home/node/.openclaw
+      - OPENCLAW_WORKSPACE_DIR=/home/node/.openclaw/workspace
       - TZ=${TZ:-UTC}
       # Host uid/gid that should own files in the mounts above
       - PUID=${PUID:-1000}
@@ -44,8 +51,6 @@ services:
       - CUSTOM_LLM_CONTEXT_WINDOW=${CUSTOM_LLM_CONTEXT_WINDOW:-128000}
       - CUSTOM_LLM_MAX_TOKENS=${CUSTOM_LLM_MAX_TOKENS:-32000}
       - CUSTOM_LLM_REASONING=${CUSTOM_LLM_REASONING:-1}
-      # Control UI device-auth toggle (default true for LAN/homelab over plain HTTP)
-      - OPENCLAW_DISABLE_DEVICE_AUTH=${OPENCLAW_DISABLE_DEVICE_AUTH:-true}
       # Log rotation tuning (archive count is hardcoded to 5 in openclaw)
       - OPENCLAW_LOG_MAX_FILE_BYTES=${OPENCLAW_LOG_MAX_FILE_BYTES:-104857600}
       # Built-in LLM providers (use one of these OR Custom LLM Base URL)
