@@ -102,13 +102,14 @@ http://YOUR-UNRAID-IP:18789/?token=YOUR_GATEWAY_TOKEN
 ```
 
 `?token=` 参数是必须的。示例：`http://192.168.1.41:18789/?token=mySecretToken123`
+OpenClaw 2.0 会将浏览器配对为已签名设备；令牌本身不会批准浏览器。如果请求等待批准，请按照“浏览器设备配对等待批准”一节操作。
 
 ### 第三步：选择正确的模型（安装后）
 
 如果你使用了非 Anthropic 提供商或自定义 LLM 端点：
 
 1. 控制 UI → **Config** 标签页 → **Agents** 子标签 → **Raw JSON**
-2. 设置 `agents.defaults.model.primary`（内置提供商参见上方表格；自定义路由器使用 `custom/<your-model-id>`）
+2. 对内置提供商，按上方表格设置 `agents.defaults.model.primary`。对自定义路由器，将 `agents.entries.main.model` 设置为 `custom/<your-model-id>`。
 3. **Save** → 重启容器
 
 ### 第四步：（可选）连接消息渠道
@@ -154,15 +155,17 @@ http://YOUR-UNRAID-IP:18789/?token=YOUR_GATEWAY_TOKEN
 
 ### 将智能体指向自定义提供商
 
-安装后，将默认模型设置为使用你的自定义提供商：
+安装后，将主智能体模型设置为使用你的自定义提供商：
 
 1. 控制 UI → **Config** → **Agents** → **Raw JSON**
 2. 添加（或编辑）agents 块：
    ```json
    {
      "agents": {
-       "defaults": {
-         "model": { "primary": "custom/llama-3.1-70b" }
+       "entries": {
+         "main": {
+           "model": "custom/llama-3.1-70b"
+         }
        }
      }
    }
@@ -189,13 +192,15 @@ http://YOUR-UNRAID-IP:18789/?token=YOUR_GATEWAY_TOKEN
 | **端口** | | | | |
 | Control UI Port | Port | 是 | `18789` | Web UI 和网关 API 端口 |
 | **路径** | | | | |
-| Config Path | Path | 是 | `/mnt/user/appdata/openclaw/config` | 配置、会话、凭据 |
-| Workspace Path | Path | 是 | `/mnt/user/appdata/openclaw/workspace` | 智能体文件、记忆、项目 |
+| OpenClaw Data | Path | 是 | `/mnt/user/appdata/openclaw/data` | 位于 `/home/node/.openclaw` 的 OpenClaw 主目录：配置、会话、插件、媒体和凭据。 |
+| Workspace | Path | 是 | `/mnt/user/appdata/openclaw/workspace` | 位于 `/home/node/.openclaw/workspace` 的智能体工作区。这是 OpenClaw Data 内 `workspace/` 目录的子挂载。 |
 | Projects Path | Path | 否 | `/mnt/user/appdata/openclaw/projects` | 额外的代码项目（高级用法） |
 | Homebrew Path | Path | 否 | `/mnt/user/appdata/openclaw/homebrew` | 持久化 Homebrew 软件包 |
-| Local Tools Path | Path | 否 | `/mnt/user/appdata/openclaw/local` | 持久化 `~/.local` —— pip `--user` 安装、手动构建的 CLI 工具（`bin/`）、库文件（`lib/`）。容器重启后保留。 |
-| Logs Path | Path | 否 | `/mnt/user/appdata/openclaw/logs` | 网关日志文件（挂载到 `/tmp/openclaw` —— OpenClaw 运行时始终写入此处，参见 [issue #61295](https://github.com/openclaw/openclaw/issues/61295)） |
+| Local Tools Path | Path | 否 | `/mnt/user/appdata/openclaw/local` | 持久化 `/home/node/.local` —— pip `--user` 安装、手动构建的 CLI 工具（`bin/`）和库文件（`lib/`）。容器重启后保留。 |
+| Logs Path | Path | 否 | `/mnt/user/appdata/openclaw/logs` | 网关日志文件。镜像将 `logging.file=/tmp/openclaw/openclaw.log` 固定；默认在 100 MB 时轮转，并保留五个归档。 |
 | **必填项** | | | | |
+| PUID | Variable | 是 | `99` | 运行网关的主机 UID。Unraid 中 `99` = `nobody`。在 Unraid 控制台运行 `id $USER` 查看你的 UID。 |
+| PGID | Variable | 是 | `100` | 主机 GID。Unraid 中 `100` = `users`。 |
 | Gateway Token | Variable | 是 | — | API/UI 访问密钥 |
 | Allowed Origins | Variable | 是 | — | 逗号分隔的浏览器来源。参见[上方章节](#allowed-origins-required-since-openclaw-20262) |
 | **自定义 LLM（内置密钥的可选替代方案）** | | | | |
@@ -220,29 +225,29 @@ http://YOUR-UNRAID-IP:18789/?token=YOUR_GATEWAY_TOKEN
 | Telegram Bot Token | Variable | 否 | — | 通过 [@BotFather](https://t.me/BotFather) 创建的 Telegram 机器人 |
 | **高级设置** | | | | |
 | Gateway Port | Variable | 否 | `18789` | 如果 18789 端口被占用则在此覆盖 |
-| Disable Device Auth | Variable | 否 | `true` | 局域网友好的默认值；如果你通过 HTTPS 访问 UI，请设为 `false` |
-| Log Max File Bytes | Variable | 否 | `26214400` | 日志文件轮转前的大小上限（25 MB）。归档数量由 OpenClaw 硬编码为 5。 |
-| Skip Permission Fix | Variable | 否 | `0` | 设为 `1` 可禁用通用权限修复（umask 0002 + 目录 setgid）。仅在你自行管理权限时禁用。 |
-| Perm Fix Interval | Variable | 否 | `5` | 运行时属主同步轮询间隔（秒）（`chown --reference` 循环）。慢速磁盘建议调大至 30+；设为 0 则仅在启动时执行一次。 |
-| PATH | Variable | 否 | （自动设置） | 系统 PATH —— 包含 `~/.local/bin`、`~/.cargo/bin`、Homebrew、Bun。完整值见 `openclaw.xml` 的 `<Default>`。 |
+| Log Max File Bytes | Variable | 否 | `104857600` | 每个日志文件轮转前的最大大小为 100 MB。OpenClaw 将归档数量固定为 5。 |
+| Skip Ownership Init | Variable | 否 | `0` | 设为 `1` 可跳过容器启动时对挂载点所有权的一次性对齐。仅在外部管理所有权时使用。 |
+| Custom LLM Reasoning | Variable | 否 | `1` | 指定自定义 LLM 模型是否支持 reasoning/thinking 块。现代 reasoning 模型默认使用 `1`；不支持 reasoning 的模型设为 `0`。 |
+| Skip System Path Remap | Variable | 否 | `0` | 设为 `1` 可跳过启动时对 `/home/node` 和 `/app` 的递归 `chown`。仅在文件系统已经对齐且不会重新创建容器时使用。 |
+| PATH | Variable | 否 | （自动设置） | 系统 PATH —— 包含 `/home/node/.local/bin`、`/home/node/.cargo/bin`、Homebrew 和 Bun。完整值见 `openclaw.xml` 的 `<Default>`。 |
 | Web Search API Key | Variable | 否 | — | Brave Search API |
 
 ### 卷挂载
 
 | 容器路径 | 主机路径 | 说明 |
 |---------|---------|------|
-| `/root/.openclaw` | `/mnt/user/appdata/openclaw/config` | 配置文件、会话、凭据 |
-| `/home/node/clawd` | `/mnt/user/appdata/openclaw/workspace` | 智能体工作区 |
+| `/home/node/.openclaw` | `/mnt/user/appdata/openclaw/data` | OpenClaw 主目录：配置、会话、插件、媒体和凭据 |
+| `/home/node/.openclaw/workspace` | `/mnt/user/appdata/openclaw/workspace` | 智能体工作区；OpenClaw Data 内的子挂载 |
 | `/projects` | `/mnt/user/appdata/openclaw/projects` | 可选的代码项目 |
 | `/home/linuxbrew/.linuxbrew` | `/mnt/user/appdata/openclaw/homebrew` | Homebrew 软件包 |
-| `/root/.local` | `/mnt/user/appdata/openclaw/local` | `~/.local` —— pip `--user` 安装、手动构建的 CLI（如 `~/.local/bin/obscura`）、库文件 |
-| `/tmp/openclaw` | `/mnt/user/appdata/openclaw/logs` | 网关日志文件（由 OpenClaw 轮转，默认上限约 150 MB） |
+| `/home/node/.local` | `/mnt/user/appdata/openclaw/local` | pip `--user` 安装、手动构建的 CLI 和库文件 |
+| `/tmp/openclaw` | `/mnt/user/appdata/openclaw/logs` | 网关日志文件：默认每个文件 100 MB、保留五个归档，总计约 600 MB |
 
 ### 日志
 
-OpenClaw 运行时始终将日志写入 `/tmp/openclaw/openclaw-YYYY-MM-DD.log`（`logging.file` 配置项目前被忽略 —— 参见 [openclaw issue #61295](https://github.com/openclaw/openclaw/issues/61295)）。模板将 `/tmp/openclaw` 挂载到主机的 `/mnt/user/appdata/openclaw/logs`，使日志不占用容器 overlay 文件系统。
+启动脚本将 `logging.file=/tmp/openclaw/openclaw.log` 固定到主机卷。OpenClaw 2026.4 会按网关实例命名默认路径（`/tmp/openclaw-0/`），而固定路径使用 `/tmp/openclaw` 挂载。
 
-内置轮转规则：当活跃日志达到 `Log Max File Bytes`（默认 25 MB）时，OpenClaw 将其重命名为 `openclaw-YYYY-MM-DD.1.log` 并重新开始写入。保留 5 个带编号的归档（数量由 OpenClaw 硬编码）。总磁盘占用上限约为 `6 * Log Max File Bytes` = 默认约 150 MB。
+内置轮转：活动日志达到 `Log Max File Bytes`（默认 100 MB）时，OpenClaw 将其重命名为 `openclaw.1.log` 并创建新日志。保留 5 个带编号的归档。默认总磁盘占用约为 `6 × Log Max File Bytes` = ~600 MB。
 
 实时追踪日志：
 ```bash
@@ -251,7 +256,7 @@ tail -f /mnt/user/appdata/openclaw/logs/openclaw-*.log
 
 清除日志：
 ```bash
-rm /mnt/user/appdata/openclaw/logs/openclaw-*.log
+rm /mnt/user/appdata/openclaw/logs/openclaw*.log
 docker restart OpenClaw
 ```
 
@@ -270,7 +275,7 @@ NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Ho
 
 ### 配置文件参考
 
-主配置文件：`/mnt/user/appdata/openclaw/config/openclaw.json`
+主配置文件：`/mnt/user/appdata/openclaw/data/openclaw.json`
 
 启动脚本在首次启动时生成最小配置：
 ```json
@@ -279,15 +284,15 @@ NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Ho
     "mode": "local",
     "bind": "lan",
     "controlUi": {
-      "allowInsecureAuth": true,
       "allowedOrigins": ["http://YOUR-UNRAID-IP:18789"]
     },
     "auth": { "mode": "token" }
   }
 }
 ```
+令牌认证仍然必填。OpenClaw 还要求对浏览器设备进行已签名配对：令牌不会批准浏览器。
 
-如果设置了 `Custom LLM Base URL`，还会同时写入 `models.providers.custom` 块。
+如果设置了 `Custom LLM Base URL`，首次启动时还会创建 `models.providers.custom` 块。
 
 首次启动后，OpenClaw 将接管此文件 —— 请通过控制 UI 的 **Config** → **Raw JSON** 进行编辑，以确保修改不丢失。
 
@@ -317,20 +322,22 @@ NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Ho
 
 **通过命令行：**
 ```bash
-docker pull ghcr.io/openclaw/openclaw:latest
+docker pull ghcr.io/thebtf/openclaw-unraid:latest
 docker restart OpenClaw
 ```
+> **OpenClaw 2.0 重要提示：** 会话和转录记录已迁移到 SQLite。升级前，请创建并验证 OpenClaw Data 的备份。降级前，请使用当前 OpenClaw CLI 恢复已归档的旧版转录记录工件。请参阅 [OpenClaw 更新和降级指南](https://docs.openclaw.ai/install/updating)。
+更新会保留已填写的值和自定义环境变量，但会丢弃明确已弃用的模板变量。`OPENCLAW_DISABLE_DEVICE_AUTH` 不再生效。
 
-**当模板本身有变更时**（新增环境变量、更新 PostArgs、ExtraParams 结构调整）：
+
+**当模板本身有变更时**（新增设置、镜像行为或挂载布局变更），请在 Unraid 控制台中运行：
 
 ```bash
-python3 scripts/merge-template.py \
-    --stored /boot/config/plugins/dockerMan/templates-user/my-OpenClaw.xml \
-    --upstream /boot/config/plugins/dockerMan/templates-user/openclaw.xml \
-    --output /boot/config/plugins/dockerMan/templates-user/my-OpenClaw.xml
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/thebtf/openclaw-unraid/master/scripts/update-on-unraid.sh)"
 ```
 
-该脚本将用户在已存模板中填写的值覆盖到上游 XML 上，同时保留原文件的 `.bak` 备份，并打印出所有需要你在 Unraid 编辑容器 UI 中审查的新字段。请在点击**编辑容器**之前运行此脚本，以确保你的令牌、API 密钥和路径在获取新模板字段的同时不会丢失。
+该包装器会通过模板的唯一标识自动定位已安装的容器，更新上游 `openclaw.xml`，并将其合并到保存的 `my-<Name>.xml`。它会保留你填写的值，创建 `.bak`，并列出新增字段。
+
+完成后，打开 Unraid Web UI → Docker → 你的容器 → **编辑容器**，填写显示的新字段并点击 **Apply**。
 
 ## 故障排查<a id="troubleshooting"></a>
 
@@ -349,27 +356,13 @@ python3 scripts/merge-template.py \
 
 网关因未设置允许来源而拒绝启动。按上述说明填写 **Allowed Origins** 模板字段，然后重启。
 
-### `control ui requires device identity (use HTTPS or localhost secure context)`
+### 浏览器设备配对等待批准
 
-浏览器要求安全上下文（HTTPS 或 `http://localhost`）才能使用 OpenClaw 用于设备身份签名的 Web Crypto API。局域网 IP/主机名上的普通 HTTP 不符合要求。
+OpenClaw 2.0 除令牌认证外还要求浏览器设备已签名配对。Dashboard 链接中的令牌不会批准浏览器。
 
-两种解决方案：
-- **使用 HTTPS** —— 用反向代理（Traefik、Caddy、NPM）为容器提供 HTTPS，通过 `https://your-domain/?token=...` 访问。然后在模板中将 `OPENCLAW_DISABLE_DEVICE_AUTH=false` 以启用完整的设备身份保护。
-- **禁用设备认证（此模板默认方案）** —— `OPENCLAW_DISABLE_DEVICE_AUTH=true`（默认值）。仍然需要令牌认证。对于仅局域网/homelab 使用是可接受的；不建议在公网上使用。
-
-此模板默认值为 `true`，因为大多数 Unraid 用户通过局域网普通 HTTP 访问控制 UI。如果你的配置已经提供了 HTTPS，可以切换为 `false`。
-
-### `disconnected (1008): control ui requires HTTPS or localhost`
-
-请确认 URL 中附带了令牌：
-```
-http://YOUR-IP:18789/?token=YOUR_TOKEN
-```
-
-如果错误依然存在，请验证配置文件：
-```bash
-cat /mnt/user/appdata/openclaw/config/openclaw.json
-```
+1. 获取新的 Dashboard 链接，并在要使用的浏览器中打开它。
+2. 在容器控制台中运行 `openclaw devices list`，找到等待处理的配对请求。
+3. 如果需要批准，请对该请求运行 `openclaw devices approve <requestId>`。
 
 ### `No API key found for provider "anthropic"`
 
@@ -385,40 +378,13 @@ cat /mnt/user/appdata/openclaw/config/openclaw.json
 
 已声明自定义 LLM 端点，但 **Custom LLM Model ID** 为空。请至少填写一个模型 ID（如 `gpt-5.5`）。
 
-### appdata 文件夹中的文件通过 SMB/NFS 不可见
+### appdata 文件夹中的文件无法通过 SMB/NFS 访问
 
-容器以 root 运行。若不加干预，所有新文件都会以 `root:root 0600` 的权限创建，SMB 共享用户将无法看到任何内容。
+网关以 `PUID:PGID` 运行；默认值为 `99:100`（`nobody:users`）。镜像启动时会将挂载点所有权与这些标识一次性对齐，然后以这些标识启动网关。不存在后台所有权同步循环。
 
-启动脚本在每次容器启动时分两阶段处理此问题：
-
-1. **一次性修复** —— 将所属权与挂载根目录对齐，并对目录设置 `umask 0002` + `chmod g+s`，使新文件继承组权限。
-2. **后台属主同步循环** —— 每隔 `OPENCLAW_PERM_FIX_INTERVAL` 秒（默认 5 秒）对挂载根目录重新执行 `chown --reference`。可捕获 OpenClaw 运行时轮转/写入的文件（如每次 UI 保存后生成的 `openclaw.json.bak`）。
-
-#### 主机端一次性配置
-
-启动脚本从挂载点本身读取 UID/GID 信息，因此**只需在主机上设置一次**所有权，设置为你的 SMB/NFS 用户期望的值。使用 `id $USER` 查找你的 UID/GID，然后执行：
-
-```bash
-# 将 YOUR_UID:YOUR_GID 替换为你的实际值（例如 99:100 = nobody:users）
-chown -R YOUR_UID:YOUR_GID /mnt/user/appdata/openclaw
-chmod -R g+rwX,o+rX /mnt/user/appdata/openclaw
-find /mnt/user/appdata/openclaw -type d -exec chmod g+s {} +
-```
-
-这与启动脚本在启动时执行的操作完全相同。手动执行可立即修复现有文件，无需等待重启。之后重启容器（或等待 `OPENCLAW_PERM_FIX_INTERVAL` 秒），让运行时循环获取新的属主引用。
-
-#### 验证
-
-```bash
-ls -la /mnt/user/appdata/openclaw/config/
-```
-
-目录应显示 `drwxrwsr-x`，属主为你的 UID/GID（组执行位中的 `s` 是 setgid 标志）。大多数文件显示 `-rw-rw-r--`。注意：**`openclaw.json` 始终保持 `-rw-------`** —— OpenClaw 故意以 0600 模式写入，因为该文件包含网关令牌和提供商 API 密钥。属主通过 SMB 可以正常读取；其他用户被设计为无法访问。
-
-#### 调优
-
-- `OPENCLAW_PERM_FIX_INTERVAL` —— 运行时属主同步循环的间隔（秒）。默认 5 秒。慢速磁盘建议调大至 30+。
-- `OPENCLAW_SKIP_PERM_FIX=1` —— 同时禁用一次性修复和后台循环。仅在你自行管理权限时使用。
+1. 在 Unraid 中运行 `id $USER` 查看用户的 UID 和 GID。
+2. 在模板的 **PUID** 和 **PGID** 字段中填写这些值，点击 **Apply**，然后重启容器。
+3. 如果由外部工具管理所有权，请设置 `OPENCLAW_SKIP_OWNERSHIP_INIT=1`，以仅跳过启动时的一次性对齐。
 
 ### 网关自重启后容器变为 STOP 状态
 
@@ -455,7 +421,7 @@ docker logs OpenClaw 2>&1 | tail -50
 
 强制重置为全新配置（会丢失 UI 中的所有编辑）：
 ```bash
-rm /mnt/user/appdata/openclaw/config/openclaw.json
+rm /mnt/user/appdata/openclaw/data/openclaw.json
 docker restart OpenClaw
 ```
 
@@ -491,7 +457,7 @@ docker exec OpenClaw sh -c 'kill -USR1 $(pidof openclaw-gateway)'
 **3. 完整启动脚本重跑**（仅当配置文件本身损坏时使用）：
 
 ```bash
-rm /mnt/user/appdata/openclaw/config/openclaw.json
+rm /mnt/user/appdata/openclaw/data/openclaw.json
 docker restart OpenClaw
 ```
 
@@ -517,27 +483,28 @@ curl -o /boot/config/plugins/dockerMan/templates-user/openclaw.xml \
 <summary><strong>高级：手动 Docker 运行</strong></summary>
 
 ```bash
-mkdir -p /mnt/user/appdata/openclaw/{config,workspace,homebrew}
+mkdir -p /mnt/user/appdata/openclaw/{data,workspace,homebrew,local,logs}
 
 docker run -d \
   --name OpenClaw \
   --network bridge \
-  --user root \
   --hostname OpenClaw \
   --restart unless-stopped \
   -p 18789:18789 \
-  -v /mnt/user/appdata/openclaw/config:/root/.openclaw:rw \
-  -v /mnt/user/appdata/openclaw/workspace:/home/node/clawd:rw \
+  -v /mnt/user/appdata/openclaw/data:/home/node/.openclaw:rw \
+  -v /mnt/user/appdata/openclaw/workspace:/home/node/.openclaw/workspace:rw \
   -v /mnt/user/appdata/openclaw/homebrew:/home/linuxbrew/.linuxbrew:rw \
+  -v /mnt/user/appdata/openclaw/local:/home/node/.local:rw \
+  -v /mnt/user/appdata/openclaw/logs:/tmp/openclaw:rw \
+  -e PUID=99 \
+  -e PGID=100 \
+  -e OPENCLAW_GATEWAY_PORT=18789 \
+  -e OPENCLAW_LOG_MAX_FILE_BYTES=104857600 \
   -e OPENCLAW_GATEWAY_TOKEN=YOUR_TOKEN \
   -e OPENCLAW_ALLOWED_ORIGINS=http://YOUR-UNRAID-IP:18789 \
   -e ANTHROPIC_API_KEY=sk-ant-YOUR_KEY \
-  -e PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  ghcr.io/openclaw/openclaw:latest \
-  sh -c '...bootstrap from openclaw.xml PostArgs...'
-```
-
-（从 `openclaw.xml` 中复制完整的 `PostArgs` 值作为最后一个参数。）
+  -e PATH=/home/node/.local/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.bun/bin:/home/node/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  ghcr.io/thebtf/openclaw-unraid:latest
 
 </details>
 
@@ -558,27 +525,13 @@ docker run -d \
 
 [MIT](LICENSE)。OpenClaw 本身也采用 MIT 许可 —— 参见 [OpenClaw 仓库](https://github.com/openclaw/openclaw)。
 
-## 启动脚本工作原理
+## 镜像如何启动
 
-启动脚本是**幂等的** —— 每次容器启动时都会重新运行，仅更新其负责的字段（`gateway.controlUi.allowedOrigins` 和 `models.providers.custom`）。你通过控制 UI 编辑的所有内容（渠道、智能体、cron 任务、工具）在重启后均会保留。
+派生镜像包含版本化入口点，每次容器启动时都会运行。它会将持久挂载点与 `PUID:PGID` 对齐，应用受支持的网关和日志设置，并以该用户身份启动 OpenClaw。
 
-脚本使用原生 `openclaw config set --batch-json` CLI 执行合并，因此 schema 校验由 OpenClaw 自身完成：无效的 `CUSTOM_LLM_API_TYPE`、缺失的 `CUSTOM_LLM_MODEL_ID`、格式错误的来源 —— 所有问题都会在网关启动前被明确报错。
+首次启动时，如果填写了 Custom LLM 字段，入口点会创建 Custom LLM 提供商和主智能体。后续启动会保留你通过 Control UI 修改的 OpenClaw 配置。
 
-### 为什么 PostArgs 中使用 base64？
-
-Unraid 模板运行器会将 `PostArgs` 中的 `<` 和 `>` 字符作为防御性措施过滤掉。这会破坏任何使用比较运算符（`i<=NF`）、重定向（`> file`）或 stderr（`>&2`）的内联 shell 脚本。Base64 字母表中不含这两个字符，因此脚本可以原样传递。
-
-实际的启动脚本位于 [`scripts/bootstrap.sh`](scripts/bootstrap.sh)。容器启动时，入口点运行 `/bin/sh -c "echo BASE64 | base64 -d | /bin/sh"`，解码并执行该脚本。
-
-### 修改启动脚本
-
-如果你 fork 了此模板并编辑了 `scripts/bootstrap.sh`，请重新生成 base64：
-
-```bash
-base64 -w0 scripts/bootstrap.sh
-```
-
-将 `openclaw.xml` 中 `echo ` 和 ` | base64 -d` 之间的长字符串替换为新值。
+入口点使用原生 OpenClaw 配置 CLI，因此 OpenClaw 会在网关启动前验证值。手动 Docker 命令使用镜像内置的用户和入口点行为。不要添加引导命令。
 
 ## 致谢<a id="credits"></a>
 

@@ -3,7 +3,7 @@
 Merge Unraid stored container template (my-OpenClaw.xml) with upstream template.
 
 Picks up new fields, ExtraParams, PostArgs from upstream while preserving every
-value the user already filled in (tokens, API keys, paths, etc.).
+value the user already filled in, except explicitly retired template fields.
 
 Usage:
     python3 merge-template.py \\
@@ -19,6 +19,9 @@ import shutil
 import sys
 from pathlib import Path
 from xml.etree import ElementTree as ET
+
+# Template-owned variables intentionally removed upstream and never carried forward.
+RETIRED_VARIABLE_TARGETS = frozenset({"OPENCLAW_DISABLE_DEVICE_AUTH"})
 
 
 def text_value(elem):
@@ -66,12 +69,11 @@ def merge_template(stored_path: Path, upstream_path: Path, output_path: Path) ->
 
     # Carry over user-added <Config> entries from stored that upstream doesn't have.
     # We DROP only entries we can be SURE are template-managed legacy (Type="Path"
-    # or Type="Port" — users never add those via Edit Container). For Type="Variable"
-    # we always KEEP, even if the Target looks like one of our managed prefixes
-    # (OPENCLAW_*, CUSTOM_LLM_*) — the user may have legitimately added an upstream
-    # OpenClaw env var (e.g. OPENCLAW_GATEWAY_STARTUP_TRACE) we don't ship in the
-    # template. Better to keep occasional legacy orphans (user removes manually
-    # once) than to silently nuke a real env var on every template upgrade.
+    # or Type="Port" — users never add those via Edit Container), plus explicitly
+    # retired template-owned Type="Variable" targets. Every other Type="Variable"
+    # stays, even if its Target looks like one of our managed prefixes (OPENCLAW_*,
+    # CUSTOM_LLM_*): the user may have legitimately added an upstream OpenClaw env
+    # var (e.g. OPENCLAW_GATEWAY_STARTUP_TRACE) we don't ship in the template.
     upstream_targets = {cfg.get("Target") for cfg in upstream_root.findall("Config")}
     upstream_container = upstream_root  # root is <Container>
 
@@ -79,6 +81,10 @@ def merge_template(stored_path: Path, upstream_path: Path, output_path: Path) ->
         if stored_cfg.get("Target") in upstream_targets:
             continue
         cfg_type = stored_cfg.get("Type", "")
+        if cfg_type == "Variable" and stored_cfg.get("Target") in RETIRED_VARIABLE_TARGETS:
+            print(f"DROPPED retired Variable (not in upstream): "
+                  f"{stored_cfg.get('Name')} ({stored_cfg.get('Target')})")
+            continue
         if cfg_type in ("Path", "Port"):
             print(f"DROPPED legacy {cfg_type} (not in upstream): "
                   f"{stored_cfg.get('Name')} ({stored_cfg.get('Target')})")

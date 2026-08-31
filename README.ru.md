@@ -102,13 +102,14 @@ http://ВАШ-IP-UNRAID:18789/?token=ВАШ_GATEWAY_TOKEN
 ```
 
 Параметр `?token=` обязателен. Пример: `http://192.168.1.41:18789/?token=mySecretToken123`
+OpenClaw 2.0 привязывает браузер как подписанное устройство; один токен его не одобряет. Если запрос ожидает одобрения, следуйте разделу «Ожидается сопряжение браузерного устройства».
 
 ### Шаг 3: Выберите правильную модель (после установки)
 
 Если вы использовали стороннего провайдера или собственный LLM-эндпоинт:
 
 1. Control UI → вкладка **Config** → подвкладка **Agents** → **Raw JSON**
-2. Задайте `agents.defaults.model.primary` (см. таблицу выше для встроенных провайдеров; для собственного роутера используйте `custom/<ваш-model-id>`)
+2. Для встроенного провайдера задайте `agents.defaults.model.primary` по таблице выше. Для собственного роутера задайте `agents.entries.main.model` равным `custom/<ваш-model-id>`.
 3. **Сохраните** → перезапустите контейнер
 
 ### Шаг 4: (Опционально) Подключите канал мессенджера
@@ -154,15 +155,17 @@ Control UI → **Config** → **Channels** — заполните данные T
 
 ### Настройка агента на собственный провайдер
 
-После установки задайте модель по умолчанию для использования собственного провайдера:
+После установки укажите модель основного агента для использования собственного провайдера:
 
 1. Control UI → **Config** → **Agents** → **Raw JSON**
 2. Добавьте (или отредактируйте) блок agents:
    ```json
    {
      "agents": {
-       "defaults": {
-         "model": { "primary": "custom/llama-3.1-70b" }
+       "entries": {
+         "main": {
+           "model": "custom/llama-3.1-70b"
+         }
        }
      }
    }
@@ -189,13 +192,15 @@ Control UI → **Config** → **Channels** — заполните данные T
 | **Порты** |
 | Control UI Port | Port | Да | `18789` | Порт веб-интерфейса и Gateway API |
 | **Пути** |
-| Config Path | Path | Да | `/mnt/user/appdata/openclaw/config` | Конфигурация, сессии, учётные данные |
-| Workspace Path | Path | Да | `/mnt/user/appdata/openclaw/workspace` | Файлы агента, память, проекты |
+| OpenClaw Data | Path | Да | `/mnt/user/appdata/openclaw/data` | Домашний каталог OpenClaw в `/home/node/.openclaw`: конфигурация, сессии, плагины, медиафайлы и учётные данные. |
+| Workspace | Path | Да | `/mnt/user/appdata/openclaw/workspace` | Рабочее пространство агента в `/home/node/.openclaw/workspace`. Это подмонтирование каталога `workspace/` внутри OpenClaw Data. |
 | Projects Path | Path | Нет | `/mnt/user/appdata/openclaw/projects` | Дополнительные проекты для разработки (продвинутый режим) |
 | Homebrew Path | Path | Нет | `/mnt/user/appdata/openclaw/homebrew` | Постоянные пакеты Homebrew |
-| Local Tools Path | Path | Нет | `/mnt/user/appdata/openclaw/local` | Постоянный `~/.local` — установки pip `--user`, вручную собранные CLI в `bin/`, библиотеки в `lib/`. Сохраняется при перезапусках. |
-| Logs Path | Path | Нет | `/mnt/user/appdata/openclaw/logs` | Лог-файлы шлюза (монтируется в `/tmp/openclaw` — runtime OpenClaw всегда пишет туда, см. [issue #61295](https://github.com/openclaw/openclaw/issues/61295)) |
+| Local Tools Path | Path | Нет | `/mnt/user/appdata/openclaw/local` | Постоянный `/home/node/.local` — установки pip `--user`, вручную собранные CLI в `bin/`, библиотеки в `lib/`. Сохраняется при перезапусках. |
+| Logs Path | Path | Нет | `/mnt/user/appdata/openclaw/logs` | Лог-файлы шлюза. Образ закрепляет `logging.file=/tmp/openclaw/openclaw.log`; по умолчанию ротация выполняется при 100 МБ и хранит пять архивов. |
 | **Обязательные** |
+| PUID | Variable | Да | `99` | UID хоста, от которого работает шлюз. `99` = `nobody` в Unraid. Узнайте свой: `id $USER` в консоли Unraid. |
+| PGID | Variable | Да | `100` | GID хоста. `100` = `users` в Unraid. |
 | Gateway Token | Variable | Да | — | Секрет для доступа к API/UI |
 | Allowed Origins | Variable | Да | — | Разрешённые browser-источники через запятую. См. [раздел выше](#allowed-origins-required-since-openclaw-20262) |
 | **Custom LLM (опциональная альтернатива встроенным ключам)** |
@@ -220,29 +225,29 @@ Control UI → **Config** → **Channels** — заполните данные T
 | Telegram Bot Token | Variable | Нет | — | Telegram-бот от [@BotFather](https://t.me/BotFather) |
 | **Продвинутые** |
 | Gateway Port | Variable | Нет | `18789` | Переопределите, если порт 18789 занят |
-| Disable Device Auth | Variable | Нет | `true` | Удобный режим для локальной сети; укажите `false`, если Control UI доступен по HTTPS |
-| Log Max File Bytes | Variable | Нет | `26214400` | 25 МБ на лог-файл до ротации. Количество архивов жёстко задано равным 5 в OpenClaw. |
-| Skip Permission Fix | Variable | Нет | `0` | Установите `1`, чтобы отключить универсальный фикс прав (umask 0002 + setgid для директорий). Отключайте только при внешнем управлении правами. |
-| Perm Fix Interval | Variable | Нет | `5` | Интервал (в секундах) между проходами runtime-синхронизации владельца (цикл `chown --reference`). Увеличьте до 30+ на медленных дисках; 0 — однократный запуск при старте. |
-| PATH | Variable | Нет | (авто) | Системный PATH — включает `~/.local/bin`, `~/.cargo/bin`, Homebrew, Bun. Полное значение — в `<Default>` файла `openclaw.xml`. |
+| Log Max File Bytes | Variable | Нет | `104857600` | 100 МБ на лог-файл до ротации. Количество архивов, равное 5, жёстко задано в OpenClaw. |
+| Skip Ownership Init | Variable | Нет | `0` | Установите `1`, чтобы пропустить однократное выравнивание владельцев точек монтирования при запуске. Используйте только при внешнем управлении владельцами. |
+| Custom LLM Reasoning | Variable | Нет | `1` | Указывает, поддерживает ли модель собственного LLM блоки reasoning/thinking. По умолчанию `1` для современных reasoning-моделей. Установите `0` для моделей без reasoning. |
+| Skip System Path Remap | Variable | Нет | `0` | Установите `1`, чтобы пропустить рекурсивный `chown` в `/home/node` и `/app` при запуске. Используйте только если файловая система уже выровнена и контейнер не будет пересоздан. |
+| PATH | Variable | Нет | (авто) | Системный PATH — включает `/home/node/.local/bin`, `/home/node/.cargo/bin`, Homebrew и Bun. Полное значение — в `<Default>` файла `openclaw.xml`. |
 | Web Search API Key | Variable | Нет | — | Brave Search API |
 
 ### Монтирование томов
 
 | Путь в контейнере | Путь на хосте | Описание |
 |-------------------|---------------|----------|
-| `/root/.openclaw` | `/mnt/user/appdata/openclaw/config` | Конфиг, сессии, учётные данные |
-| `/home/node/clawd` | `/mnt/user/appdata/openclaw/workspace` | Рабочее пространство агента |
+| `/home/node/.openclaw` | `/mnt/user/appdata/openclaw/data` | Домашний каталог OpenClaw: конфиг, сессии, плагины, медиафайлы и учётные данные |
+| `/home/node/.openclaw/workspace` | `/mnt/user/appdata/openclaw/workspace` | Рабочее пространство агента — подмонтирование внутри OpenClaw Data |
 | `/projects` | `/mnt/user/appdata/openclaw/projects` | Опциональные проекты для разработки |
 | `/home/linuxbrew/.linuxbrew` | `/mnt/user/appdata/openclaw/homebrew` | Пакеты Homebrew |
-| `/root/.local` | `/mnt/user/appdata/openclaw/local` | `~/.local` — pip `--user`, вручную собранные CLI (например `~/.local/bin/obscura`), библиотеки |
-| `/tmp/openclaw` | `/mnt/user/appdata/openclaw/logs` | Лог-файлы шлюза (ротация средствами OpenClaw, ограничение по умолчанию ~150 МБ) |
+| `/home/node/.local` | `/mnt/user/appdata/openclaw/local` | Установки pip `--user`, вручную собранные CLI и библиотеки |
+| `/tmp/openclaw` | `/mnt/user/appdata/openclaw/logs` | Лог-файлы шлюза: 100 МБ на файл и пять архивов по умолчанию, всего около 600 МБ |
 
 ### Логи
 
-Runtime OpenClaw всегда пишет логи в `/tmp/openclaw/openclaw-YYYY-MM-DD.log` (параметр конфига `logging.file` сейчас игнорируется — см. [openclaw issue #61295](https://github.com/openclaw/openclaw/issues/61295)). Шаблон монтирует `/tmp/openclaw` в `/mnt/user/appdata/openclaw/logs` на хосте, чтобы логи не накапливались на overlay-файловой системе контейнера.
+Бутстрап закрепляет `logging.file=/tmp/openclaw/openclaw.log`, поэтому логи надёжно сохраняются на хостовом томе. OpenClaw 2026.4 разделяет стандартные пути по экземплярам (`/tmp/openclaw-0/`), а закреплённый путь использует монтирование `/tmp/openclaw`.
 
-Встроенная ротация: когда активный лог достигает **Log Max File Bytes** (по умолчанию 25 МБ), OpenClaw переименовывает его в `openclaw-YYYY-MM-DD.1.log` и начинает новый. Хранятся 5 пронумерованных архивов (количество жёстко задано в OpenClaw). Общий объём на диске ≈ `6 × Log Max File Bytes` = ~150 МБ при настройках по умолчанию.
+Встроенная ротация: когда активный лог достигает `Log Max File Bytes` (по умолчанию 100 МБ), OpenClaw переименовывает его в `openclaw.1.log` и создаёт новый. Хранятся 5 пронумерованных архивов. Общий объём на диске ≈ `6 × Log Max File Bytes` = ~600 МБ при настройках по умолчанию.
 
 Следить за логами в реальном времени:
 ```bash
@@ -251,7 +256,7 @@ tail -f /mnt/user/appdata/openclaw/logs/openclaw-*.log
 
 Очистить логи:
 ```bash
-rm /mnt/user/appdata/openclaw/logs/openclaw-*.log
+rm /mnt/user/appdata/openclaw/logs/openclaw*.log
 docker restart OpenClaw
 ```
 
@@ -270,7 +275,7 @@ NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Ho
 
 ### Справочник по конфигурационному файлу
 
-Основной конфиг: `/mnt/user/appdata/openclaw/config/openclaw.json`
+Основной конфиг: `/mnt/user/appdata/openclaw/data/openclaw.json`
 
 При первом запуске бутстрап создаёт минимальный конфиг:
 ```json
@@ -279,15 +284,15 @@ NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Ho
     "mode": "local",
     "bind": "lan",
     "controlUi": {
-      "allowInsecureAuth": true,
       "allowedOrigins": ["http://ВАШ-IP-UNRAID:18789"]
     },
     "auth": { "mode": "token" }
   }
 }
 ```
+Авторизация по токену остаётся обязательной. OpenClaw также требует подписанную привязку браузерного устройства: токен не одобряет браузер.
 
-Если задан `Custom LLM Base URL`, к нему добавляется блок `models.providers.custom`.
+Если задан `Custom LLM Base URL`, при первом запуске также создаётся блок `models.providers.custom`.
 
 После первого запуска этот файл принадлежит OpenClaw — редактируйте через Control UI **Config** → **Raw JSON**, чтобы изменения сохранялись корректно.
 
@@ -317,20 +322,22 @@ NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Ho
 
 **Через командную строку:**
 ```bash
-docker pull ghcr.io/openclaw/openclaw:latest
+docker pull ghcr.io/thebtf/openclaw-unraid:latest
 docker restart OpenClaw
 ```
+> **Важно для OpenClaw 2.0:** сессии и транскрипты перенесены в SQLite. Перед обновлением сделайте и проверьте резервную копию OpenClaw Data. Перед откатом используйте актуальный CLI OpenClaw, чтобы восстановить архивные артефакты прежних транскриптов. См. [руководство OpenClaw по обновлению и откату](https://docs.openclaw.ai/install/updating).
+При обновлении сохраняются заполненные значения и пользовательские переменные окружения, но явно выведенные из эксплуатации переменные шаблона отбрасываются. `OPENCLAW_DISABLE_DEVICE_AUTH` больше не применяется.
 
-**Если изменился сам шаблон** (новые переменные окружения, обновлённые PostArgs, реструктурированные ExtraParams):
+
+**Если изменился сам шаблон** (новые настройки, поведение образа или схема монтирования), выполните в консоли Unraid:
 
 ```bash
-python3 scripts/merge-template.py \
-    --stored /boot/config/plugins/dockerMan/templates-user/my-OpenClaw.xml \
-    --upstream /boot/config/plugins/dockerMan/templates-user/openclaw.xml \
-    --output /boot/config/plugins/dockerMan/templates-user/my-OpenClaw.xml
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/thebtf/openclaw-unraid/master/scripts/update-on-unraid.sh)"
 ```
 
-Скрипт накладывает значения, заполненные пользователем в сохранённом шаблоне, на upstream-xml, сохраняет `.bak` исходника и выводит новые поля, которые стоит проверить в UI «Edit Container». Запустите скрипт **до** нажатия «Edit Container», чтобы токены, API-ключи и пути сохранились при обновлении, а новые поля уровня шаблона подтянулись автоматически.
+Обёртка автоматически находит установленный контейнер по уникальным признакам шаблона, обновляет upstream `openclaw.xml` и объединяет его с сохранённым `my-<Name>.xml`. Она сохраняет заполненные вами значения, создаёт `.bak` и выводит список новых полей.
+
+После завершения откройте Unraid Web UI → Docker → ваш контейнер → **Edit Container**, задайте показанные новые поля и нажмите **Apply**.
 
 ## Устранение неполадок <a id="устранение-неполадок"></a>
 
@@ -349,27 +356,13 @@ Origin вашего браузера отсутствует в списке `al
 
 Шлюз отказывается запускаться, так как не заданы разрешённые источники. Заполните поле **Allowed Origins** в шаблоне, как описано выше, и перезапустите контейнер.
 
-### `control ui requires device identity (use HTTPS or localhost secure context)`
+### Ожидается сопряжение браузерного устройства
 
-Браузеры требуют безопасного контекста (HTTPS или `http://localhost`) для использования Web Crypto API, который OpenClaw применяет для подписи device-identity. Обычный HTTP на LAN IP или hostname под это требование не подпадает.
+OpenClaw 2.0 требует подписанное сопряжение браузерного устройства наряду с авторизацией по токену. Токен в ссылке Dashboard не одобряет браузер.
 
-Два варианта решения:
-- **Использовать HTTPS** — поставьте перед контейнером обратный прокси (Traefik, Caddy, NPM) и открывайте `https://ваш-домен/?token=...`. Затем установите `OPENCLAW_DISABLE_DEVICE_AUTH=false` в шаблоне для полной защиты device-identity.
-- **Отключить device auth (вариант по умолчанию в этом шаблоне)** — `OPENCLAW_DISABLE_DEVICE_AUTH=true` (по умолчанию). Авторизация по токену по-прежнему обязательна. Приемлемо для домашнего использования в локальной сети; не рекомендуется при открытом доступе из интернета.
-
-Шаблон по умолчанию использует `true`, так как большинство пользователей Unraid открывают Control UI через обычный HTTP в локальной сети. Если у вас уже настроен HTTPS — переключите на `false`.
-
-### `disconnected (1008): control ui requires HTTPS or localhost`
-
-Убедитесь, что к URL добавлен токен:
-```
-http://ВАШ-IP:18789/?token=ВАШ_ТОКЕН
-```
-
-Если ошибка сохраняется, проверьте конфигурационный файл:
-```bash
-cat /mnt/user/appdata/openclaw/config/openclaw.json
-```
+1. Получите свежую ссылку Dashboard и откройте её в браузере, который хотите использовать.
+2. В консоли контейнера выполните `openclaw devices list`, чтобы найти ожидающий запрос сопряжения.
+3. Если требуется одобрение, выполните `openclaw devices approve <requestId>` для этого запроса.
 
 ### `No API key found for provider "anthropic"`
 
@@ -385,40 +378,13 @@ cat /mnt/user/appdata/openclaw/config/openclaw.json
 
 Задан Custom LLM-эндпоинт, но поле **Custom LLM Model ID** пустое. Укажите хотя бы один ID модели (например `gpt-5.5`).
 
-### Файлы в папке appdata не видны по SMB / NFS
+### Файлы в папке appdata не видны по SMB / NFS
 
-Контейнер работает от root. Без дополнительных мер каждый новый файл создавался бы с правами `root:root 0600`, и пользователь SMB-шары не смог бы его увидеть.
+Шлюз запускается с `PUID:PGID`; по умолчанию это `99:100` (`nobody:users`). При старте образ один раз выравнивает владельцев точек монтирования с этими идентификаторами, затем запускает шлюз с ними. Фонового цикла смены владельцев нет.
 
-Бутстрап решает это в два этапа при каждом запуске контейнера:
-
-1. **Однократный фикс** — выравнивает владельца по корневой точке монтирования и устанавливает `umask 0002` + `chmod g+s` на директории, чтобы новые файлы наследовали группу.
-2. **Фоновый цикл синхронизации владельца** — каждые `OPENCLAW_PERM_FIX_INTERVAL` секунд (по умолчанию 5) повторно запускает `chown --reference` для корневых точек монтирования. Это необходимо для файлов, которые OpenClaw ротирует или создаёт в runtime (например, `openclaw.json.bak` после каждого сохранения через UI).
-
-#### Однократная настройка на стороне хоста
-
-Бутстрап берёт UID/GID из самой точки монтирования, поэтому **один раз** задайте владельца на хосте — такого, какого ожидает ваш SMB/NFS-пользователь. Узнайте UID/GID командой `id $USER`, затем:
-
-```bash
-# Замените YOUR_UID:YOUR_GID на ваши значения (например 99:100 = nobody:users)
-chown -R YOUR_UID:YOUR_GID /mnt/user/appdata/openclaw
-chmod -R g+rwX,o+rX /mnt/user/appdata/openclaw
-find /mnt/user/appdata/openclaw -type d -exec chmod g+s {} +
-```
-
-Это то же самое, что делает бутстрап при старте. Ручной запуск сразу исправляет существующие файлы без ожидания перезапуска. После этого перезапустите контейнер (или подождите `OPENCLAW_PERM_FIX_INTERVAL` секунд), чтобы runtime-цикл подхватил новые данные о владельце.
-
-#### Проверка
-
-```bash
-ls -la /mnt/user/appdata/openclaw/config/
-```
-
-Директории должны иметь вид `drwxrwsr-x` с вашим UID/GID (символ `s` в правах группы — это бит setgid). Большинство файлов — `-rw-rw-r--`. Обратите внимание: **`openclaw.json` остаётся `-rw-------`** — OpenClaw намеренно создаёт его с режимом 0600, так как файл содержит gateway-токен и ключи провайдеров. Владелец читает нормально через SMB; остальные пользователи намеренно лишены доступа.
-
-#### Тонкая настройка
-
-- `OPENCLAW_PERM_FIX_INTERVAL` — интервал (в секундах) для цикла синхронизации владельца. По умолчанию 5. Увеличьте до 30+ на медленных дисках.
-- `OPENCLAW_SKIP_PERM_FIX=1` — полностью отключает как однократный фикс, так и фоновый цикл. Используйте только при внешнем управлении правами.
+1. Узнайте UID и GID пользователя Unraid: `id $USER`.
+2. Укажите эти значения в полях шаблона **PUID** и **PGID**, затем нажмите **Apply** и перезапустите контейнер.
+3. Если владельцами управляет внешний инструмент, установите `OPENCLAW_SKIP_OWNERSHIP_INIT=1`, чтобы пропустить только однократное выравнивание при запуске.
 
 ### Контейнер переходит в STOP после перезапуска шлюза
 
@@ -455,7 +421,7 @@ docker logs OpenClaw 2>&1 | tail -50
 
 Для принудительного сброса конфига (теряются все правки через UI):
 ```bash
-rm /mnt/user/appdata/openclaw/config/openclaw.json
+rm /mnt/user/appdata/openclaw/data/openclaw.json
 docker restart OpenClaw
 ```
 
@@ -491,7 +457,7 @@ docker exec OpenClaw sh -c 'kill -USR1 $(pidof openclaw-gateway)'
 **3. Полный перезапуск бутстрапа** (только если сам конфигурационный файл сломан):
 
 ```bash
-rm /mnt/user/appdata/openclaw/config/openclaw.json
+rm /mnt/user/appdata/openclaw/data/openclaw.json
 docker restart OpenClaw
 ```
 
@@ -517,27 +483,28 @@ curl -o /boot/config/plugins/dockerMan/templates-user/openclaw.xml \
 <summary><strong>Продвинутый режим: ручной запуск Docker</strong></summary>
 
 ```bash
-mkdir -p /mnt/user/appdata/openclaw/{config,workspace,homebrew}
+mkdir -p /mnt/user/appdata/openclaw/{data,workspace,homebrew,local,logs}
 
 docker run -d \
   --name OpenClaw \
   --network bridge \
-  --user root \
   --hostname OpenClaw \
   --restart unless-stopped \
   -p 18789:18789 \
-  -v /mnt/user/appdata/openclaw/config:/root/.openclaw:rw \
-  -v /mnt/user/appdata/openclaw/workspace:/home/node/clawd:rw \
+  -v /mnt/user/appdata/openclaw/data:/home/node/.openclaw:rw \
+  -v /mnt/user/appdata/openclaw/workspace:/home/node/.openclaw/workspace:rw \
   -v /mnt/user/appdata/openclaw/homebrew:/home/linuxbrew/.linuxbrew:rw \
+  -v /mnt/user/appdata/openclaw/local:/home/node/.local:rw \
+  -v /mnt/user/appdata/openclaw/logs:/tmp/openclaw:rw \
+  -e PUID=99 \
+  -e PGID=100 \
+  -e OPENCLAW_GATEWAY_PORT=18789 \
+  -e OPENCLAW_LOG_MAX_FILE_BYTES=104857600 \
   -e OPENCLAW_GATEWAY_TOKEN=YOUR_TOKEN \
   -e OPENCLAW_ALLOWED_ORIGINS=http://YOUR-UNRAID-IP:18789 \
   -e ANTHROPIC_API_KEY=sk-ant-YOUR_KEY \
-  -e PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  ghcr.io/openclaw/openclaw:latest \
-  sh -c '...bootstrap from openclaw.xml PostArgs...'
-```
-
-(Скопируйте полное значение `PostArgs` из `openclaw.xml` в качестве последнего аргумента.)
+  -e PATH=/home/node/.local/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.bun/bin:/home/node/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  ghcr.io/thebtf/openclaw-unraid:latest
 
 </details>
 
@@ -558,27 +525,13 @@ docker run -d \
 
 [MIT](LICENSE). OpenClaw распространяется под лицензией MIT — см. [репозиторий OpenClaw](https://github.com/openclaw/openclaw).
 
-## Как работает бутстрап
+## Как запускается образ
 
-Бутстрап **идемпотентен** — запускается при каждом старте контейнера и обновляет только те поля, которыми управляет (`gateway.controlUi.allowedOrigins` и `models.providers.custom`). Всё, что вы меняете через Control UI (каналы, агенты, cron, инструменты), сохраняется между перезапусками.
+Производный образ содержит версионируемую точку входа, которая запускается при каждом запуске контейнера. Она выравнивает постоянные точки монтирования с `PUID:PGID`, применяет поддерживаемые настройки шлюза и логирования и запускает OpenClaw от имени этого пользователя.
 
-Для мерджа используется нативный CLI `openclaw config set --batch-json`, поэтому валидацию схемы выполняет сам OpenClaw: неверный `CUSTOM_LLM_API_TYPE`, отсутствующий `CUSTOM_LLM_MODEL_ID`, некорректные origins — всё это обнаруживается с понятной ошибкой до запуска шлюза.
+При первом запуске точка входа создаёт провайдера Custom LLM и основного агента, если заполнены поля Custom LLM. Позднее запуски сохраняют конфигурацию OpenClaw, изменённую через Control UI.
 
-### Зачем base64 в PostArgs?
-
-Раннер шаблонов Unraid удаляет символы `<` и `>` из `PostArgs` как защитную меру. Это ломает любой inline-скрипт, использующий сравнения (`i<=NF`), перенаправления (`> file`) или stderr (`>&2`). В алфавите base64 ни одного из этих символов нет, поэтому скрипт проходит без искажений.
-
-Сам бутстрап находится в [`scripts/bootstrap.sh`](scripts/bootstrap.sh). При запуске контейнера точка входа выполняет `/bin/sh -c "echo BASE64 | base64 -d | /bin/sh"`, декодируя и запуская скрипт.
-
-### Модификация бутстрапа
-
-Если вы форкаете этот шаблон и редактируете `scripts/bootstrap.sh`, пересоздайте base64:
-
-```bash
-base64 -w0 scripts/bootstrap.sh
-```
-
-Замените длинную строку между `echo ` и ` | base64 -d` в `openclaw.xml` новым значением.
+Точка входа использует нативный CLI конфигурации OpenClaw, поэтому значения проверяет OpenClaw до запуска шлюза. Ручная Docker-команда использует встроенное поведение образа для пользователя и точки входа. Не добавляйте команду бутстрапа.
 
 ## Благодарности <a id="благодарности"></a>
 

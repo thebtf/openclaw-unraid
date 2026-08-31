@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **OpenClaw 2.0 compatibility.** Removed the retired browser authentication environment setting, pinned container state to `/home/node/.openclaw`, the workspace to `/home/node/.openclaw/workspace`, and local tools to `/home/node/.local`, and migrated the documentation to the derived image and signed browser device pairing.
+
+- **OpenClaw 2.0 migration warning.** Sessions and transcripts migrate to SQLite. Make a verified backup before upgrading. Before downgrading, use the current OpenClaw CLI to restore archived legacy transcript artifacts. See [OpenClaw's Updating guide](https://docs.openclaw.ai/install/updating).
+
+- **Custom LLM first-boot seed.** Uses keyed `agents.entries.main.model` and preserves other agents and models.
+
 ## [2.0.0] — 2026-07-02
 
 ### BREAKING (image + config-ownership change)

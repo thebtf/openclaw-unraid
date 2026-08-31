@@ -69,7 +69,7 @@ OpenClaw defaults to Anthropic's Claude. **If you use a different provider, chan
 
 1. Install OpenClaw with your API key (e.g. `GEMINI_API_KEY`)
 2. Open the Control UI → **Config** tab → **Agents** → **Raw JSON**
-3. Set `agents.defaults.model.primary` to match your provider:
+3. Set `agents.entries.main.model` to match your provider:
 
 | Provider | Model Example |
 |----------|---------------|
@@ -108,7 +108,7 @@ The `?token=` parameter is mandatory. Example: `http://192.168.1.41:18789/?token
 If you used a non-Anthropic provider or the Custom LLM endpoint:
 
 1. Control UI → **Config** tab → **Agents** sub-tab → **Raw JSON**
-2. Set `agents.defaults.model.primary` (see table above for built-in providers; for the custom router use `custom/<your-model-id>`)
+2. Set `agents.entries.main.model` (see table above for built-in providers; for the custom router use `custom/<your-model-id>`)
 3. **Save** → restart the container
 
 ### Step 4: (Optional) Connect a messaging channel
@@ -128,7 +128,7 @@ If you run your own LLM router or local model server, set the four **Custom LLM*
 
 > **Common mistake:** `Custom LLM API Type` is the **protocol adapter**, not the model name. Putting a model name there fails openclaw's schema validation and the gateway refuses to start. Model name goes in `Custom LLM Model ID`.
 
-When `Custom LLM Base URL` is set, the bootstrap writes a `models.providers.custom` block into `openclaw.json` via the native `openclaw config set` CLI:
+When `Custom LLM Base URL` is set, the entrypoint writes a `models.providers.custom` block into `openclaw.json` and seeds `agents.entries.main.model` with the first custom model ID:
 
 ```json
 {
@@ -152,23 +152,27 @@ The `${CUSTOM_LLM_API_KEY}` reference is resolved at gateway start, so the key i
 
 > **Note:** `contextWindow` and `maxTokens` in the generated config come from the **Custom LLM Context Window** and **Custom LLM Max Tokens** template fields (defaults: `128000` / `32000`). Adjust those template fields to match your model — e.g., `gpt-4o`: 128000 / 16384; `claude-3-opus`: 200000 / 4096; `gpt-5.5`: 1050000 / 128000.
 
-### Pointing the agent at the custom provider
+### Point the main agent at the custom provider
 
-After install, set the default model to use your custom provider:
+On first boot, the entrypoint sets `agents.entries.main.model` to the first Custom LLM Model ID. The keyed seed preserves other agents and models.
+
+To select a different custom model after install:
 
 1. Control UI → **Config** → **Agents** → **Raw JSON**
-2. Add (or edit) the agents block:
+2. Add (or edit) the `main` entry:
    ```json
    {
      "agents": {
-       "defaults": {
-         "model": { "primary": "custom/llama-3.1-70b" }
+       "entries": {
+         "main": {
+           "model": "custom/llama-3.1-70b"
+         }
        }
      }
    }
    ```
-   Replace `llama-3.1-70b` with whatever model id your router exposes.
-3. Save → restart the container
+   Replace `llama-3.1-70b` with the model ID that your router exposes.
+3. Save, then restart the container.
 
 ### Allowed Origins (required since OpenClaw 2026.2)
 
@@ -189,12 +193,12 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | **Ports** |
 | Control UI Port | Port | Yes | `18789` | Web UI and Gateway API port |
 | **Paths** |
-| Config Path | Path | Yes | `/mnt/user/appdata/openclaw/config` | Configuration, sessions, credentials |
-| Workspace Path | Path | Yes | `/mnt/user/appdata/openclaw/workspace` | Agent files, memory, projects |
+| OpenClaw Data | Path | Yes | `/mnt/user/appdata/openclaw/data` | OpenClaw home at `/home/node/.openclaw`: config, sessions, plugins, media, and credentials. |
+| Workspace | Path | Yes | `/mnt/user/appdata/openclaw/workspace` | Agent workspace at `/home/node/.openclaw/workspace`. This sub-mount overlays the `workspace/` directory in OpenClaw Data. |
 | Projects Path | Path | No | `/mnt/user/appdata/openclaw/projects` | Additional coding projects (advanced) |
 | Homebrew Path | Path | No | `/mnt/user/appdata/openclaw/homebrew` | Persistent Homebrew packages |
-| Local Tools Path | Path | No | `/mnt/user/appdata/openclaw/local` | Persistent `~/.local` — pip `--user` installs, manually-built CLIs in `bin/`, libs in `lib/`. Survives restarts. |
-| Logs Path | Path | No | `/mnt/user/appdata/openclaw/logs` | Gateway log files. Bootstrap pins `logging.file=/tmp/openclaw/openclaw.log` to keep them on the host volume regardless of OpenClaw's instance namespacing (`/tmp/openclaw-0/` since 2026.4). |
+| Local Tools Path | Path | No | `/mnt/user/appdata/openclaw/local` | Persistent `~/.local` at `/home/node/.local`: pip `--user` installs, manually built CLIs in `bin/`, and libraries in `lib/`. |
+| Logs Path | Path | No | `/mnt/user/appdata/openclaw/logs` | Gateway log files. The image pins `logging.file=/tmp/openclaw/openclaw.log`; rotation uses 100 MB per active file and keeps five archives by default. |
 | **Required** |
 | PUID | Variable | Yes | `99` | Host user ID the gateway runs under. `99` = `nobody` on Unraid. Find yours: `id $USER` on Unraid console. |
 | PGID | Variable | Yes | `100` | Host group ID. `100` = `users` on Unraid. |
@@ -222,7 +226,6 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | Telegram Bot Token | Variable | No | — | Telegram bot from [@BotFather](https://t.me/BotFather) |
 | **Advanced** |
 | Gateway Port | Variable | No | `18789` | Override if 18789 is taken |
-| Disable Device Auth | Variable | No | `1` | LAN-friendly default; set `0` if you front the UI with HTTPS |
 | Log Max File Bytes | Variable | No | `104857600` | 100 MB per log file before rotation (matches OpenClaw upstream default). Archive count is hardcoded to 5 by openclaw. |
 | Skip Ownership Init | Variable | No | `0` | Set `1` to skip the one-shot ownership alignment at container start. Bootstrap normally aligns mount ownership to PUID:PGID once, then exec's the gateway under those IDs (no loops). Disable only if you manage ownership externally. |
 | Custom LLM Reasoning | Variable | No | `1` | Whether the custom LLM model(s) support reasoning/thinking blocks. Default `1` (enabled) for modern models (gpt-5.5, o1, claude-opus-4.7). Set `0` for non-reasoning models. |
@@ -234,12 +237,12 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 
 | Container Path | Host Path | Description |
 |----------------|-----------|-------------|
-| `/root/.openclaw` | `/mnt/user/appdata/openclaw/config` | Config file, sessions, credentials |
-| `/home/node/clawd` | `/mnt/user/appdata/openclaw/workspace` | Agent workspace |
+| `/home/node/.openclaw` | `/mnt/user/appdata/openclaw/data` | OpenClaw data: config, sessions, plugins, media, and credentials |
+| `/home/node/.openclaw/workspace` | `/mnt/user/appdata/openclaw/workspace` | Agent workspace sub-mount |
 | `/projects` | `/mnt/user/appdata/openclaw/projects` | Optional coding projects |
 | `/home/linuxbrew/.linuxbrew` | `/mnt/user/appdata/openclaw/homebrew` | Homebrew packages |
-| `/root/.local` | `/mnt/user/appdata/openclaw/local` | `~/.local` — pip `--user`, manually-built CLIs (e.g. `~/.local/bin/obscura`), libs |
-| `/tmp/openclaw` | `/mnt/user/appdata/openclaw/logs` | Gateway log files (rotated by openclaw, default cap ~150 MB) |
+| `/home/node/.local` | `/mnt/user/appdata/openclaw/local` | Persistent `~/.local`: pip `--user`, manually built CLIs, and libraries |
+| `/tmp/openclaw` | `/mnt/user/appdata/openclaw/logs` | Gateway log files (100 MB per file and five archives by default; about 600 MB total) |
 
 ### Permissions (PUID/PGID)
 
@@ -300,22 +303,23 @@ Ignore the "Next steps" output — the template already configures `PATH`. Homeb
 
 ### Config File Reference
 
-Main config: `/mnt/user/appdata/openclaw/config/openclaw.json`
+Main config: `/mnt/user/appdata/openclaw/data/openclaw.json`
 
-Bootstrap creates a minimal config on first start:
+The image creates a minimal config on first start:
 ```json
 {
   "gateway": {
     "mode": "local",
     "bind": "lan",
     "controlUi": {
-      "allowInsecureAuth": true,
       "allowedOrigins": ["http://YOUR-UNRAID-IP:18789"]
     },
     "auth": { "mode": "token" }
   }
 }
 ```
+
+Token auth remains required. OpenClaw also requires signed browser device pairing; the token does not approve a browser.
 
 If you set `Custom LLM Base URL`, the `models.providers.custom` block is added too.
 
@@ -376,22 +380,24 @@ Functions that consume this:
 
 ## Updating
 
+> **OpenClaw 2.0 migration warning:** OpenClaw migrates sessions and transcripts to SQLite. Make a verified backup of OpenClaw Data before you upgrade. Before you downgrade, use the current OpenClaw CLI to restore archived legacy transcript artifacts. See [OpenClaw's Updating guide](https://docs.openclaw.ai/install/updating).
+
 **Via Unraid Docker UI:**
 1. Docker tab → Click OpenClaw icon → Check for Updates → Apply
 
 **Via command line:**
 ```bash
-docker pull ghcr.io/openclaw/openclaw:latest
+docker pull ghcr.io/thebtf/openclaw-unraid:latest
 docker restart OpenClaw
 ```
 
-**When the template itself has changed** (new env vars, updated PostArgs, restructured ExtraParams) — Homebrew-style one-liner on the Unraid console:
+**When the template itself has changed** (new settings, image behavior, or mount layout) — Homebrew-style one-liner on the Unraid console:
 
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/thebtf/openclaw-unraid/master/scripts/update-on-unraid.sh)"
 ```
 
-The wrapper auto-detects your installed container by scanning `templates-user/my-*.xml` for our unique fingerprints (forum thread URL + icon URL). Refreshes the upstream `openclaw.xml` (used by Add Container) AND merges it into your stored `my-<Name>.xml` (used by Edit Container) — preserving every value you've filled in, writing a `.bak`, and printing the list of NEW fields.
+The wrapper auto-detects your installed container by scanning `templates-user/my-*.xml` for our unique fingerprints (forum thread URL + icon URL). It refreshes the upstream `openclaw.xml` (used by Add Container) and merges it into your stored `my-<Name>.xml` (used by Edit Container). It preserves user values and custom variables, but deliberately drops retired template variables such as `OPENCLAW_DISABLE_DEVICE_AUTH`. It writes a `.bak` and prints the new fields.
 
 After it finishes: Unraid Web UI → Docker → your container → Edit Container → set any new fields shown → Apply.
 
@@ -430,31 +436,17 @@ Your browser's origin is not in the `allowedOrigins` list.
 
 The gateway refuses to start because no allowed origins were set. Set the **Allowed Origins** template field as described above, then restart.
 
-### `control ui requires device identity (use HTTPS or localhost secure context)`
+### Browser device pairing is pending
 
-Browsers require a secure context (HTTPS or `http://localhost`) to use the Web Crypto API that openclaw uses for device-identity signing. Plain HTTP on a LAN IP/hostname does not qualify.
+OpenClaw 2.0 requires signed browser device pairing as well as token auth. The token in the dashboard link does not approve the browser.
 
-Two fixes:
-- **Use HTTPS** — front the container with a reverse proxy (Traefik, Caddy, NPM) and open `https://your-domain/?token=...`. Then set `OPENCLAW_DISABLE_DEVICE_AUTH=false` in the template for full device-identity protection.
-- **Disable device auth (default for this template)** — `OPENCLAW_DISABLE_DEVICE_AUTH=1` (default). Token auth still required. Acceptable for LAN-only / homelab use; not recommended over the open internet.
-
-The template default is `1` (enabled) because most Unraid users access the Control UI over plain HTTP on the LAN. If your setup already gives you HTTPS, switch to `0`.
-
-### `disconnected (1008): control ui requires HTTPS or localhost`
-
-Make sure you appended the token to the URL:
-```
-http://YOUR-IP:18789/?token=YOUR_TOKEN
-```
-
-If the error persists, verify the config file:
-```bash
-cat /mnt/user/appdata/openclaw/config/openclaw.json
-```
+1. Get a fresh dashboard link and open it in the browser that you want to use.
+2. From the container console, run `openclaw devices list` to identify a pending pairing request.
+3. Run `openclaw devices approve <requestId>` for the pending request when approval is required.
 
 ### `No API key found for provider "anthropic"`
 
-You provided a non-Anthropic key but the default model is still `anthropic/claude-sonnet-4-5`. Change `agents.defaults.model.primary` to match your provider — see [Using Non-Anthropic Providers](#using-non-anthropic-providers-openai-gemini-groq-openrouter-xai-zai).
+You provided a non-Anthropic key but the main agent model is still `anthropic/claude-sonnet-4-5`. Change `agents.entries.main.model` to match your provider — see [Using Non-Anthropic Providers](#using-non-anthropic-providers-openai-gemini-groq-openrouter-xai-zai).
 
 ### `Config invalid` / `models.providers.custom.api: Invalid option`
 
@@ -493,7 +485,7 @@ v1.1.1+ removes the loop entirely. On first start under v1.1.1+:
 ```bash
 docker exec OpenClaw id
 # uid=1026(node) gid=100(users) groups=100(users)
-ls -la /mnt/user/appdata/openclaw/config/
+ls -la /mnt/user/appdata/openclaw/data/
 ```
 
 Files should be `1026:100`. **`openclaw.json` stays mode `-rw-------`** — openclaw writes it 0600 by design (gateway token + provider keys). Owner (you) reads it fine via SMB; other users by design can't.
@@ -537,7 +529,7 @@ The bootstrap prints `[bootstrap]` lines for every action. Common fatals:
 
 To force a fully fresh config (loses any UI edits):
 ```bash
-rm /mnt/user/appdata/openclaw/config/openclaw.json
+rm /mnt/user/appdata/openclaw/data/openclaw.json
 docker restart OpenClaw
 ```
 
@@ -573,7 +565,7 @@ Use this when the gateway is wedged, after upgrading the image, or if SIGUSR1 di
 **3. Full bootstrap re-run** (only if the config file itself is broken):
 
 ```bash
-rm /mnt/user/appdata/openclaw/config/openclaw.json
+rm /mnt/user/appdata/openclaw/data/openclaw.json
 docker restart OpenClaw
 ```
 
@@ -599,27 +591,29 @@ curl -o /boot/config/plugins/dockerMan/templates-user/openclaw.xml \
 <summary><strong>Advanced: Manual Docker Run</strong></summary>
 
 ```bash
-mkdir -p /mnt/user/appdata/openclaw/{config,workspace,homebrew}
+mkdir -p /mnt/user/appdata/openclaw/{data,workspace,local,homebrew,logs}
 
 docker run -d \
   --name OpenClaw \
   --network bridge \
-  --user root \
   --hostname OpenClaw \
   --restart unless-stopped \
   -p 18789:18789 \
-  -v /mnt/user/appdata/openclaw/config:/root/.openclaw:rw \
-  -v /mnt/user/appdata/openclaw/workspace:/home/node/clawd:rw \
+  -v /mnt/user/appdata/openclaw/data:/home/node/.openclaw:rw \
+  -v /mnt/user/appdata/openclaw/workspace:/home/node/.openclaw/workspace:rw \
+  -v /mnt/user/appdata/openclaw/local:/home/node/.local:rw \
   -v /mnt/user/appdata/openclaw/homebrew:/home/linuxbrew/.linuxbrew:rw \
+  -v /mnt/user/appdata/openclaw/logs:/tmp/openclaw:rw \
+  -e PUID=99 \
+  -e PGID=100 \
+  -e OPENCLAW_GATEWAY_PORT=18789 \
+  -e OPENCLAW_LOG_MAX_FILE_BYTES=104857600 \
   -e OPENCLAW_GATEWAY_TOKEN=YOUR_TOKEN \
   -e OPENCLAW_ALLOWED_ORIGINS=http://YOUR-UNRAID-IP:18789 \
   -e ANTHROPIC_API_KEY=sk-ant-YOUR_KEY \
-  -e PATH=/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/root/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-  ghcr.io/openclaw/openclaw:latest \
-  sh -c '...bootstrap from openclaw.xml PostArgs...'
+  -e PATH=/home/node/.local/bin:/home/linuxbrew/.linuxbrew/bin:/home/linuxbrew/.linuxbrew/sbin:/home/node/.bun/bin:/home/node/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+  ghcr.io/thebtf/openclaw-unraid:latest
 ```
-
-(Copy the full `PostArgs` value from `openclaw.xml` for the final argument.)
 
 </details>
 
@@ -640,27 +634,13 @@ Default builtin memory works fine for casual use. For better recall, knowledge g
 
 [MIT](LICENSE). OpenClaw itself is MIT — see the [OpenClaw repository](https://github.com/openclaw/openclaw).
 
-## How the bootstrap works
+## How the image starts
 
-The bootstrap is **idempotent** — it re-runs on every container start and only updates the fields it owns (`gateway.controlUi.allowedOrigins` and `models.providers.custom`). Anything you edit through the Control UI (channels, agents, cron, tools) is preserved across restarts.
+The derived image includes a versioned entrypoint that runs on every container start. It aligns the persistent mounts to `PUID:PGID`, applies supported gateway and logging settings, and starts OpenClaw as that user.
 
-It uses the native `openclaw config set --batch-json` CLI for the merge, so schema validation is performed by openclaw itself: invalid `CUSTOM_LLM_API_TYPE`, missing `CUSTOM_LLM_MODEL_ID`, malformed origins — all caught with a clear error before the gateway starts.
+On first boot, the entrypoint seeds `models.providers.custom` and the keyed `agents.entries.main.model` when you supply the Custom LLM template fields. This preserves other agents and models. Later starts preserve the OpenClaw configuration that you change in the Control UI.
 
-### Why base64 in PostArgs?
-
-The Unraid template runner strips `<` and `>` characters from `PostArgs` as a defensive measure. This breaks any inline shell script that uses comparisons (`i<=NF`), redirects (`> file`), or stderr (`>&2`). Base64 alphabet has neither character, so the script survives unmodified.
-
-The actual bootstrap lives at [`scripts/bootstrap.sh`](scripts/bootstrap.sh). On container start the entrypoint runs `/bin/sh -c "echo BASE64 | base64 -d | /bin/sh"`, which decodes and executes it.
-
-### Modifying the bootstrap
-
-If you fork this template and edit `scripts/bootstrap.sh`, regenerate the base64:
-
-```bash
-base64 -w0 scripts/bootstrap.sh
-```
-
-Replace the long string between `echo ` and ` | base64 -d` in `openclaw.xml` with the new value.
+The entrypoint uses the native OpenClaw configuration CLI, so OpenClaw validates values before the gateway starts. The manual Docker command uses the image's built-in user and entrypoint behavior. Do not add a bootstrap command.
 
 ## Credits
 
