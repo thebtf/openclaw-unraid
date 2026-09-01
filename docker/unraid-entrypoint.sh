@@ -44,6 +44,18 @@ case "$PGID" in
   ''|*[!0-9]*) echo "[bootstrap] FATAL: PGID='$PGID' must be numeric." 1>&2; exit 1 ;;
 esac
 
+# Version-scoped persisted-config migration is opt-in. Reject invalid values
+# before user or filesystem mutation.
+CONFIG_MIGRATION_MODE="${OPENCLAW_CONFIG_MIGRATION:-check}"
+case "$CONFIG_MIGRATION_MODE" in
+  check|apply-v2026.8.1)
+    ;;
+  *)
+    echo "[bootstrap] FATAL: OPENCLAW_CONFIG_MIGRATION='$CONFIG_MIGRATION_MODE' is invalid. Expected check or apply-v2026.8.1." 1>&2
+    exit 1
+    ;;
+esac
+
 # Everything below assumes we start as root (image sets USER root; the
 # template must NOT pass --user). Fail loud if someone overrode it.
 if [ "$(id -u)" != "0" ]; then
@@ -265,16 +277,43 @@ exec_gateway() {
     node /app/dist/index.js gateway --bind lan --auth token
 }
 
-# Existing persisted configs must pass the narrow backup-first recovery before
-# template-managed writes can safely resume.
+# An invalid persisted config has a version-scoped operator boundary before
+# template-managed writes. An already-migrated result with native validation
+# still red is unsupported and must not reach managed writes.
 if [ "$CONFIG_EXISTED" = "1" ]; then
   if ! run_as_puid node /app/dist/index.js config validate >/dev/null 2>&1; then
-    echo "[bootstrap] existing config needs OpenClaw migration; applying narrow backup-first migration"
-    if ! run_as_puid /usr/local/bin/migrate-openclaw-2-config.py --config "$CFG" --apply; then
-      echo "[bootstrap] FATAL: narrow OpenClaw migration failed; refusing managed writes." 1>&2
+    echo "[bootstrap] existing config needs OpenClaw v2026.8.1 migration"
+    case "$CONFIG_MIGRATION_MODE" in
+      check)
+        echo "[bootstrap] running narrow OpenClaw v2026.8.1 migration check"
+        if ! MIGRATION_RESULT=$(run_as_puid /usr/local/bin/migrate-openclaw-2-config.py --config "$CFG"); then
+          echo "[bootstrap] FATAL: narrow OpenClaw v2026.8.1 migration check failed; refusing managed writes." 1>&2
+          exit 1
+        fi
+        ;;
+      apply-v2026.8.1)
+        echo "[bootstrap] applying narrow backup-first migration for OpenClaw v2026.8.1"
+        if ! MIGRATION_RESULT=$(run_as_puid /usr/local/bin/migrate-openclaw-2-config.py --config "$CFG" --apply); then
+          echo "[bootstrap] FATAL: narrow OpenClaw v2026.8.1 migration failed; refusing managed writes." 1>&2
+          exit 1
+        fi
+        ;;
+    esac
+
+    printf '%s\n' "$MIGRATION_RESULT"
+    if printf '%s\n' "$MIGRATION_RESULT" | grep -Fqx 'already migrated'; then
+      echo "[bootstrap] FATAL: existing OpenClaw config is invalid but the v2026.8.1 migrator reports already migrated; this invalid configuration is unsupported. Refusing managed writes." 1>&2
+      exit 1
+    fi
+    if [ "$CONFIG_MIGRATION_MODE" = "check" ]; then
+      echo "[bootstrap] FATAL: existing OpenClaw config is invalid. Review the printed path-only plan, then set OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1 for one start. After that start, verify the printed backup path and return OPENCLAW_CONFIG_MIGRATION to check. Refusing managed writes." 1>&2
       exit 1
     fi
     CONFIG_RECOVERY_ATTEMPTED=1
+  else
+    if [ "$CONFIG_MIGRATION_MODE" = "apply-v2026.8.1" ]; then
+      echo "[bootstrap] WARNING: OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1 is no longer needed for this valid existing config. Return it to check before the next image update." 1>&2
+    fi
   fi
 fi
 

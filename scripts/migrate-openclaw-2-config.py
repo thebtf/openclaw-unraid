@@ -27,6 +27,8 @@ MISSING = object()
 MODEL_REFERENCE = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._:+-]*)+$"
 )
+# Legacy agents.list IDs must already be canonical keyed-entry names.
+AGENT_ID = re.compile(r"^[a-z0-9_][a-z0-9_-]{0,63}$")
 
 
 class MigrationError(Exception):
@@ -48,6 +50,14 @@ class ChangeLog:
     @property
     def paths(self) -> List[str]:
         return self._paths
+
+
+class LegacyAllowedModels:
+    """Distinguish an empty legacy list from unusable legacy values."""
+
+    def __init__(self, models: List[str], materialize: bool) -> None:
+        self.models = models
+        self.materialize = materialize
 
 
 def _shape_error(path: str) -> MigrationError:
@@ -73,21 +83,98 @@ def _validate_memory_search(value: Any, path: str) -> Dict[str, Any]:
     return search
 
 
-def _normalize_allowed_models(value: Any, path: str) -> List[str]:
-    models = _expect_list(value, path)
+def _roster_error(path: str) -> MigrationError:
+    return MigrationError(
+        "unsafe agent roster at " + path + "; run openclaw doctor --fix"
+    )
+
+
+def _validate_legacy_agent_roster(entries: List[Any]) -> None:
+    if not entries:
+        raise _roster_error("agents.list")
+
+    ids = set()
+    for index, entry in enumerate(entries):
+        entry_path = "agents.list[{}]".format(index)
+        if not isinstance(entry, dict):
+            raise _roster_error(entry_path)
+        agent_id = entry.get("id")
+        if (
+            not isinstance(agent_id, str)
+            or not agent_id
+            or agent_id != agent_id.strip()
+            or not AGENT_ID.fullmatch(agent_id)
+        ):
+            raise _roster_error(entry_path + ".id")
+        if agent_id in ids:
+            raise _roster_error(entry_path + ".id")
+        ids.add(agent_id)
+        if "default" in entry:
+            default = entry["default"]
+            if not isinstance(default, bool) or default:
+                raise _roster_error(entry_path + ".default")
+
+
+def _validate_keyed_agent_roster(entries: Dict[str, Any], ownership: Any) -> None:
+    if not entries:
+        raise _roster_error("agents.entries")
+
+    marked = 0
+    for entry in entries.values():
+        if not isinstance(entry, dict):
+            raise _roster_error("agents.entries")
+        if "default" in entry:
+            default = entry["default"]
+            if not isinstance(default, bool):
+                raise _roster_error("agents.entries")
+            if default:
+                marked += 1
+
+    if marked > 1:
+        raise _roster_error("agents.entries")
+    if ownership == "explicit" and marked:
+        raise _roster_error("agents.ownership")
+
+
+def _validate_agent_roster(agents: Dict[str, Any]) -> None:
+    has_list = "list" in agents
+    has_entries = "entries" in agents
+    if has_list and has_entries:
+        raise _roster_error("agents")
+
+    ownership = agents.get("ownership", MISSING)
+    if ownership is not MISSING and ownership != "explicit":
+        raise _roster_error("agents.ownership")
+
+    if has_list:
+        entries = agents["list"]
+        if not isinstance(entries, list):
+            raise _roster_error("agents.list")
+        _validate_legacy_agent_roster(entries)
+    elif has_entries:
+        entries = agents["entries"]
+        if not isinstance(entries, dict):
+            raise _roster_error("agents.entries")
+        _validate_keyed_agent_roster(entries, ownership)
+
+
+def _normalize_allowed_models(value: Any) -> LegacyAllowedModels:
     normalized: List[str] = []
-    for index, item in enumerate(models):
-        item_path = "{}[{}]".format(path, index)
-        if not isinstance(item, str):
-            raise MigrationError("unsafe llm model entry at " + item_path)
-        reference = item.strip()
-        if not MODEL_REFERENCE.fullmatch(reference):
-            raise MigrationError("unsafe llm model entry at " + item_path)
-        normalized.append(reference)
-    return normalized
+    if isinstance(value, list):
+        if not value:
+            return LegacyAllowedModels(normalized, False)
+        for item in value:
+            if (
+                isinstance(item, str)
+                and item == item.strip()
+                and MODEL_REFERENCE.fullmatch(item)
+            ):
+                normalized.append(item)
+    return LegacyAllowedModels(normalized, True)
 
 
-def _validate_configuration(root: Any) -> Optional[List[str]]:
+
+def _validate_configuration(root: Any) -> Optional[LegacyAllowedModels]:
     """Validate just the named migration surface before any in-memory mutation."""
     root = _expect_object(root, "$")
 
@@ -110,6 +197,8 @@ def _validate_configuration(root: Any) -> Optional[List[str]]:
                 _expect_object(defaults["mediaModels"], "agents.defaults.mediaModels")
             if "compaction" in defaults:
                 _expect_object(defaults["compaction"], "agents.defaults.compaction")
+        _validate_agent_roster(agents)
+
         if "list" in agents:
             entries = _expect_list(agents["list"], "agents.list")
             for index, entry in enumerate(entries):
@@ -138,7 +227,7 @@ def _validate_configuration(root: Any) -> Optional[List[str]]:
         if "controlUi" in gateway:
             _expect_object(gateway["controlUi"], "gateway.controlUi")
 
-    normalized_models: Optional[List[str]] = None
+    normalized_models: Optional[LegacyAllowedModels] = None
     if "plugins" in root:
         plugins = _expect_object(root["plugins"], "plugins")
         if "entries" in plugins:
@@ -148,12 +237,13 @@ def _validate_configuration(root: Any) -> Optional[List[str]]:
                 if "config" in llm_task:
                     config = _expect_object(llm_task["config"], "plugins.entries.llm-task.config")
                     if "allowedModels" in config:
-                        normalized_models = _normalize_allowed_models(
-                            config["allowedModels"],
-                            "plugins.entries.llm-task.config.allowedModels",
-                        )
+                        normalized_models = _normalize_allowed_models(config["allowedModels"])
                 if "llm" in llm_task:
                     llm = _expect_object(llm_task["llm"], "plugins.entries.llm-task.llm")
+                    for key in ("allowModelOverride", "allowAuthProfileOverride"):
+                        if key in llm and not isinstance(llm[key], bool):
+                            raise _shape_error("plugins.entries.llm-task.llm." + key)
+
                     if "allowedCompletionModels" in llm:
                         _expect_list(
                             llm["allowedCompletionModels"],
@@ -260,15 +350,39 @@ def _migrate_agent_memory_search(
 
 
 
-def _migrate_agent_memory_searches(root: Dict[str, Any], changes: ChangeLog) -> None:
+def _migrate_agent_roster(root: Dict[str, Any], changes: ChangeLog) -> None:
     agents = root.get("agents")
     if not isinstance(agents, dict):
         return
 
-    entries = agents.get("list")
-    if isinstance(entries, list):
-        for index, entry in enumerate(entries):
-            _migrate_agent_memory_search(entry, "agents.list[{}]".format(index), changes)
+    if "list" in agents:
+        converted_entries: Dict[str, Any] = {}
+        for index, entry in enumerate(agents["list"]):
+            agent_id = entry.pop("id")
+            converted_entries[agent_id] = entry
+            changes.add("agents.list[{}].id".format(index))
+        del agents["list"]
+        agents["entries"] = converted_entries
+        changes.add("agents.list")
+        changes.add("agents.entries")
+        if len(converted_entries) > 1 and "ownership" not in agents:
+            agents["ownership"] = "explicit"
+            changes.add("agents.ownership")
+        return
+
+    keyed_entries = agents.get("entries")
+    if not isinstance(keyed_entries, dict) or len(keyed_entries) <= 1 or "ownership" in agents:
+        return
+    if any(entry.get("default") is True for entry in keyed_entries.values()):
+        return
+    agents["ownership"] = "explicit"
+    changes.add("agents.ownership")
+
+
+def _migrate_agent_memory_searches(root: Dict[str, Any], changes: ChangeLog) -> None:
+    agents = root.get("agents")
+    if not isinstance(agents, dict):
+        return
 
     named_entries = agents.get("entries")
     if isinstance(named_entries, dict):
@@ -323,7 +437,7 @@ def _migrate_gateway_controls(root: Dict[str, Any], changes: ChangeLog) -> None:
 
 
 def _migrate_llm_task(
-    root: Dict[str, Any], normalized_models: Optional[List[str]], changes: ChangeLog
+    root: Dict[str, Any], normalized_models: Optional[LegacyAllowedModels], changes: ChangeLog
 ) -> None:
     plugins = root.get("plugins")
     if not isinstance(plugins, dict) or "entries" not in plugins:
@@ -333,21 +447,26 @@ def _migrate_llm_task(
         return
 
     llm_task = entries["llm-task"]
-    if normalized_models is None:
-        return
-
     if "llm" not in llm_task:
         llm_task["llm"] = {}
     llm = llm_task["llm"]
+    for key in ("allowModelOverride", "allowAuthProfileOverride"):
+        if key not in llm:
+            llm[key] = True
+            changes.add("plugins.entries.llm-task.llm." + key)
+
+    if normalized_models is None:
+        return
+
     config = llm_task["config"]
-    if "allowedCompletionModels" not in llm:
-        llm["allowedCompletionModels"] = normalized_models
+    if normalized_models.materialize and "allowedCompletionModels" not in llm:
+        llm["allowedCompletionModels"] = normalized_models.models
         changes.add("plugins.entries.llm-task.llm.allowedCompletionModels")
     del config["allowedModels"]
     changes.add("plugins.entries.llm-task.config.allowedModels")
 
 
-def _migrate(root: Dict[str, Any], normalized_models: Optional[List[str]]) -> List[str]:
+def _migrate(root: Dict[str, Any], normalized_models: Optional[LegacyAllowedModels]) -> List[str]:
     changes = ChangeLog()
 
     meta = root.get("meta")
@@ -359,6 +478,7 @@ def _migrate(root: Dict[str, Any], normalized_models: Optional[List[str]]) -> Li
     memory = root.get("memory")
     if isinstance(memory, dict) and "search" in memory:
         _migrate_memory_search_settings(memory["search"], "memory.search", changes)
+    _migrate_agent_roster(root, changes)
     _migrate_agent_memory_searches(root, changes)
     _migrate_agent_defaults(root, changes)
     _migrate_gateway_controls(root, changes)
@@ -385,7 +505,34 @@ def _assert_canonical_agent_memory_search(entry: Dict[str, Any], path: str) -> N
         _assert_memory_search_invariants(memory["search"], path + ".memory.search")
 
 
-def _assert_legacy_paths_absent(root: Dict[str, Any]) -> None:
+def _assert_agent_roster_invariants(
+    agents: Dict[str, Any], converted_legacy_list: bool
+) -> None:
+    if "list" in agents:
+        raise MigrationError("migration invariant failed: legacy path remains: agents.list")
+
+    entries = agents.get("entries")
+    if not isinstance(entries, dict):
+        return
+    marked = sum(entry.get("default") is True for entry in entries.values())
+    ownership = agents.get("ownership")
+    if marked > 1:
+        raise MigrationError("migration invariant failed: multiple default agent markers remain")
+    if ownership == "explicit" and marked:
+        raise MigrationError(
+            "migration invariant failed: agents.ownership conflicts with default marker"
+        )
+    if len(entries) > 1 and not marked and ownership != "explicit":
+        raise MigrationError(
+            "migration invariant failed: markerless multi-agent roster lacks agents.ownership"
+        )
+    if converted_legacy_list and any("id" in entry for entry in entries.values()):
+        raise MigrationError("migration invariant failed: legacy path remains: agents.entries.*.id")
+
+
+def _assert_legacy_paths_absent(
+    root: Dict[str, Any], converted_legacy_list: bool = False
+) -> None:
     meta = root.get("meta")
     if isinstance(meta, dict) and "lastTouchedAt" in meta:
         raise MigrationError("migration invariant failed: legacy path remains: meta.lastTouchedAt")
@@ -414,16 +561,7 @@ def _assert_legacy_paths_absent(root: Dict[str, Any]) -> None:
                     "migration invariant failed: legacy path remains: "
                     "agents.defaults.compaction.truncateAfterCompaction"
                 )
-        entries = agents.get("list")
-        if isinstance(entries, list):
-            for index, entry in enumerate(entries):
-                if isinstance(entry, dict) and "memorySearch" in entry:
-                    raise MigrationError(
-                        "migration invariant failed: legacy path remains: "
-                        "agents.list[{}].memorySearch".format(index)
-                    )
-                if isinstance(entry, dict):
-                    _assert_canonical_agent_memory_search(entry, "agents.list[{}]".format(index))
+        _assert_agent_roster_invariants(agents, converted_legacy_list)
         named_entries = agents.get("entries")
         if isinstance(named_entries, dict):
             for name, entry in named_entries.items():
@@ -435,6 +573,7 @@ def _assert_legacy_paths_absent(root: Dict[str, Any]) -> None:
                     )
                 if isinstance(entry, dict):
                     _assert_canonical_agent_memory_search(entry, "agents.entries." + name)
+
 
     gateway = root.get("gateway")
     if isinstance(gateway, dict):
@@ -452,6 +591,22 @@ def _assert_legacy_paths_absent(root: Dict[str, Any]) -> None:
         if isinstance(entries, dict):
             llm_task = entries.get("llm-task")
             if isinstance(llm_task, dict):
+                llm = llm_task.get("llm")
+                if not isinstance(llm, dict):
+                    raise MigrationError(
+                        "migration invariant failed: missing plugins.entries.llm-task.llm"
+                    )
+                for key in ("allowModelOverride", "allowAuthProfileOverride"):
+                    if key not in llm:
+                        raise MigrationError(
+                            "migration invariant failed: missing plugins.entries.llm-task.llm."
+                            + key
+                        )
+                    if not isinstance(llm[key], bool):
+                        raise MigrationError(
+                            "migration invariant failed: non-boolean plugins.entries.llm-task.llm."
+                            + key
+                        )
                 config = llm_task.get("config")
                 if isinstance(config, dict) and "allowedModels" in config:
                     raise MigrationError(
@@ -652,8 +807,9 @@ def migrate(config_path: Path, apply: bool) -> int:
     normalized_models = _validate_configuration(root)
 
     changes = _migrate(root, normalized_models)
+    converted_legacy_list = "agents.list" in changes
     _validate_configuration(root)
-    _assert_legacy_paths_absent(root)
+    _assert_legacy_paths_absent(root, converted_legacy_list)
 
     if not changes:
         print("already migrated")
@@ -662,7 +818,7 @@ def migrate(config_path: Path, apply: bool) -> int:
     replacement = _serialize_json(root, has_bom)
     reparsed, _ = _load_json(replacement)
     _validate_configuration(reparsed)
-    _assert_legacy_paths_absent(reparsed)
+    _assert_legacy_paths_absent(reparsed, converted_legacy_list)
     if reparsed != root:
         raise MigrationError("serialized migration did not preserve configuration semantics")
 
