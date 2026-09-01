@@ -256,6 +256,7 @@ run_as_puid() {
   setpriv --reuid="$PUID" --regid="$PGID" --init-groups \
     env HOME=/home/node PATH="$PATH" "$@"
 }
+CONFIG_RECOVERY_ATTEMPTED=0
 
 exec_gateway() {
   echo "[bootstrap] dropping privileges to $PUID:$PGID and starting gateway"
@@ -273,10 +274,7 @@ if [ "$CONFIG_EXISTED" = "1" ]; then
       echo "[bootstrap] FATAL: narrow OpenClaw migration failed; refusing managed writes." 1>&2
       exit 1
     fi
-    if ! run_as_puid node /app/dist/index.js config validate >/dev/null 2>&1; then
-      echo "[bootstrap] FATAL: OpenClaw config remains invalid after narrow migration; refusing managed writes." 1>&2
-      exit 1
-    fi
+    CONFIG_RECOVERY_ATTEMPTED=1
   fi
 fi
 
@@ -303,6 +301,13 @@ echo "[bootstrap] applying managed gateway/logging keys"
 if ! run_as_puid node /app/dist/index.js config set --batch-json "$BATCH"; then
   echo "[bootstrap] FATAL: openclaw rejected the managed-keys update. See errors above." 1>&2
   exit 1
+fi
+
+if [ "$CONFIG_RECOVERY_ATTEMPTED" = "1" ]; then
+  if ! run_as_puid node /app/dist/index.js config validate >/dev/null 2>&1; then
+    echo "[bootstrap] FATAL: OpenClaw config remains invalid after narrow migration and managed-key update; refusing startup." 1>&2
+    exit 1
+  fi
 fi
 
 # --- FIRST-BOOT SEEDING (once, marker-gated, collection-preserving) ---
