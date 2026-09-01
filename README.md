@@ -227,6 +227,7 @@ The list must contain **full origins** (scheme + host + port). No wildcards, no 
 | **Advanced** |
 | Gateway Port | Variable | No | `18789` | Override if 18789 is taken |
 | Log Max File Bytes | Variable | No | `104857600` | 100 MB per log file before rotation (matches OpenClaw upstream default). Archive count is hardcoded to 5 by openclaw. |
+| Config Migration | Variable | No | `auto` | On image updates, migrates only supported OpenClaw 2026.8.1 legacy or partial config shapes. See [Updating](#updating). |
 | Skip Ownership Init | Variable | No | `0` | Set `1` to skip the one-shot ownership alignment at container start. Bootstrap normally aligns mount ownership to PUID:PGID once, then exec's the gateway under those IDs (no loops). Disable only if you manage ownership externally. |
 | Custom LLM Reasoning | Variable | No | `1` | Whether the custom LLM model(s) support reasoning/thinking blocks. Default `1` (enabled) for modern models (gpt-5.5, o1, claude-opus-4.7). Set `0` for non-reasoning models. |
 | Skip System Path Remap | Variable | No | `0` | Set `1` to skip the /home/node and /app recursive chown sweep at start (saves 2-3 min per Apply). Use only when filesystem is already aligned and you don't expect Unraid to recreate the container. |
@@ -277,7 +278,6 @@ docker exec -e OPENCLAW_LOG_LEVEL=debug -e OPENCLAW_GATEWAY_STARTUP_TRACE=1 Open
 Diagnostic CLI inside the container:
 ```bash
 docker exec OpenClaw sh -c 'cd /app && node dist/index.js doctor'           # health check
-docker exec OpenClaw sh -c 'cd /app && node dist/index.js doctor --fix'     # manual troubleshooting only; never an automatic upgrade recovery
 docker exec OpenClaw sh -c 'cd /app && node dist/index.js config validate'  # schema check
 docker exec OpenClaw sh -c 'cd /app && node dist/index.js gateway stability --bundle latest --json'  # last crash snapshot
 ```
@@ -380,17 +380,13 @@ Functions that consume this:
 
 ## Updating
 
-> **OpenClaw 2.0 migration warning:** OpenClaw migrates sessions and transcripts to SQLite. Make a verified backup of OpenClaw Data before you upgrade. Before you downgrade, use the current OpenClaw CLI to restore archived legacy transcript artifacts. See [OpenClaw's Updating guide](https://docs.openclaw.ai/install/updating).
+Leave **Config Migration** at its default, `auto`, and use the normal image update once. If the image recognizes the exact supported OpenClaw 2026.8.1 legacy or partial config shape, it first writes a byte-exact adjacent backup, applies the migration atomically, and then starts the gateway. Current config is a no-op and creates no backup. An ambiguous or unsupported config remains byte-identical, creates no backup, and startup refuses with the following recovery message. A normal restart is idempotent and does not create a second backup.
 
-### Existing persisted configuration
+```
+existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape. It was left byte-identical and no migration backup was created. Preserve openclaw.json and recover it manually; do not run broad doctor --fix as an automatic upgrade step.
+```
 
-Before upgrading, make and verify a backup of OpenClaw Data. Updating the image alone detects a persisted configuration that needs migration; it never applies migration changes without opt-in. `OPENCLAW_CONFIG_MIGRATION` is an advanced environment variable that defaults to `check`. For an invalid existing `openclaw.json`, `check` runs the narrow migrator. When it prints a value-free, path-only plan, it exits without changing the config or creating a backup. An exact `already migrated` result while native validation remains red is unsupported and does not permit managed writes.
-
-To opt in to the v2026.8.1 migration once, set `OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1` in Unraid **Edit Container** or your Compose environment and start the container. The migrator creates an adjacent timestamped `openclaw.json.v2026.8.1-backup-*` backup before it writes and prints the exact backup path. Check that path, return `OPENCLAW_CONFIG_MIGRATION` to `check`, and restart normally. A later valid restart does not need the token. After you verify the backup path, return it to `check`: a later image accepts only its own version-scoped token and rejects stale values.
-
-In the logs, `[bootstrap] existing config needs OpenClaw v2026.8.1 migration` followed by `dry run: planned changed paths` and the opt-in FATAL is the expected safe refusal. `FATAL: existing OpenClaw config is invalid but the v2026.8.1 migrator reports already migrated` means the narrow migration cannot repair this invalid config; do not set the apply token. Do not use full `openclaw doctor --fix` as routine upgrade recovery. It remains a manual troubleshooting tool after you preserve the backup; the entrypoint never runs it automatically.
-
-If the container is stopped and cannot reach the image migrator, use the manual fallback from this repository. Find the **OpenClaw Data** host path in the Unraid template. Do not paste configuration values into a command. Run `python3 scripts/migrate-openclaw-2-config.py --config <OpenClaw-Data-host-path>/openclaw.json` first; it defaults to a dry run. After you review its output, add `--apply` to migrate. The script creates an adjacent timestamped, byte-for-byte backup and prints only the affected paths.
+`auto` needs no broad `doctor --fix` command or manual migration helper. For diagnosis only, set `OPENCLAW_CONFIG_MIGRATION=check`. It makes no changes and creates no backup. Then restart with `OPENCLAW_CONFIG_MIGRATION=auto`, which is the default. Set `OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1` only to apply the supported migration explicitly during recovery.
 
 **Via Unraid Docker UI:**
 1. Docker tab → Click OpenClaw icon → Check for Updates → Apply
@@ -536,9 +532,8 @@ The bootstrap prints `[bootstrap]` lines for every action. Common fatals:
 - `FATAL: CUSTOM_LLM_API_TYPE='...' is invalid` — see allowed adapter values above.
 - `FATAL: CUSTOM_LLM_MODEL_ID is required` — set at least one model id.
 - `FATAL: openclaw rejected the config update` — schema validation failed; the offending batch JSON is printed below the error.
-- `FATAL: OPENCLAW_CONFIG_MIGRATION='...' is invalid` — use `check` or the one-time `apply-v2026.8.1` token.
-- `FATAL: existing OpenClaw config is invalid.` — default `check` printed the path-only plan and refused writes; follow the upgrade instructions above before opting in.
-- `FATAL: existing OpenClaw config is invalid but the v2026.8.1 migrator reports already migrated` — this invalid configuration is unsupported by the narrow migration. Do not set the apply token; use manual troubleshooting after preserving the config.
+- `FATAL: OPENCLAW_CONFIG_MIGRATION='...' is invalid` — use `auto` (the default), `check`, or `apply-v2026.8.1`.
+- `existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape` — the config was left byte-identical and no migration backup was created. Preserve `openclaw.json` and recover it manually. Do not run broad `doctor --fix` as an automatic upgrade step.
 
 To force a fully fresh config (loses any UI edits):
 ```bash
