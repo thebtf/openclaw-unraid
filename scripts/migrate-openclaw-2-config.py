@@ -7,6 +7,7 @@ No config values are emitted by this tool.
 
 import argparse
 import codecs
+import errno
 from datetime import datetime, timezone
 import json
 import os
@@ -19,10 +20,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 MISSING = object()
-# A migration may carry forward only an explicit provider/model reference. In
-# particular, patterns, aliases, profile selectors, and nested provider paths
-# are not safe to reinterpret in a recovery script.
-MODEL_REFERENCE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:+-]*$")
+# A migration may carry forward only a literal provider/model reference,
+# including slash-separated provider namespaces and model IDs. Patterns,
+# aliases, and profile selectors are not safe to reinterpret in a recovery
+# script.
+MODEL_REFERENCE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._:+-]*)+$"
+)
 
 
 class MigrationError(Exception):
@@ -620,12 +624,13 @@ def _fsync_parent_directory(directory: Path) -> None:
     directory_flag = getattr(os, "O_DIRECTORY", None)
     if directory_flag is None:
         return
+    descriptor = os.open(str(directory), os.O_RDONLY | directory_flag)
     try:
-        descriptor = os.open(str(directory), os.O_RDONLY | directory_flag)
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
+        try:
+            os.fsync(descriptor)
+        except OSError as error:
+            if error.errno not in (errno.EINVAL, errno.ENOTSUP, errno.ENOSYS):
+                raise
     finally:
         os.close(descriptor)
 
