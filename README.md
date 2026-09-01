@@ -384,11 +384,11 @@ Functions that consume this:
 
 ### Existing persisted configuration
 
-Before upgrading, make and verify a backup of OpenClaw Data. On the first upgraded start, if the existing configuration fails validation, the image applies a narrow backup-first migration before template-managed writes and first-boot seeding. It creates a timestamped `openclaw.json.v2026.8.1-backup-*` backup, validates the migrated configuration, then continues the managed-write and seeding path in the same start. If the migration or validation fails, the entrypoint fails closed.
+Before upgrading, make and verify a backup of OpenClaw Data. Updating the image alone detects a persisted configuration that needs migration; it never applies migration changes without opt-in. `OPENCLAW_CONFIG_MIGRATION` is an advanced environment variable that defaults to `check`. For an invalid existing `openclaw.json`, `check` runs the narrow migrator. When it prints a value-free, path-only plan, it exits without changing the config or creating a backup. An exact `already migrated` result while native validation remains red is unsupported and does not permit managed writes.
 
-Signed browser device pairing remains expected in OpenClaw 2.0. Approve a pending browser request as described in [Browser device pairing is pending](#browser-device-pairing-is-pending).
+To opt in to the v2026.8.1 migration once, set `OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1` in Unraid **Edit Container** or your Compose environment and start the container. The migrator creates an adjacent timestamped `openclaw.json.v2026.8.1-backup-*` backup before it writes and prints the exact backup path. Check that path, return `OPENCLAW_CONFIG_MIGRATION` to `check`, and restart normally. A later valid restart does not need the token. After you verify the backup path, return it to `check`: a later image accepts only its own version-scoped token and rejects stale values.
 
-For targeted troubleshooting, inspect the container logs for `[bootstrap] existing config needs OpenClaw migration; applying narrow backup-first migration`. Do not use full `openclaw doctor --fix` as routine upgrade recovery. It is a manual troubleshooting tool after you have preserved the backup; the entrypoint never runs it automatically.
+In the logs, `[bootstrap] existing config needs OpenClaw v2026.8.1 migration` followed by `dry run: planned changed paths` and the opt-in FATAL is the expected safe refusal. `FATAL: existing OpenClaw config is invalid but the v2026.8.1 migrator reports already migrated` means the narrow migration cannot repair this invalid config; do not set the apply token. Do not use full `openclaw doctor --fix` as routine upgrade recovery. It remains a manual troubleshooting tool after you preserve the backup; the entrypoint never runs it automatically.
 
 If the container is stopped and cannot reach the image migrator, use the manual fallback from this repository. Find the **OpenClaw Data** host path in the Unraid template. Do not paste configuration values into a command. Run `python3 scripts/migrate-openclaw-2-config.py --config <OpenClaw-Data-host-path>/openclaw.json` first; it defaults to a dry run. After you review its output, add `--apply` to migrate. The script creates an adjacent timestamped, byte-for-byte backup and prints only the affected paths.
 
@@ -536,6 +536,9 @@ The bootstrap prints `[bootstrap]` lines for every action. Common fatals:
 - `FATAL: CUSTOM_LLM_API_TYPE='...' is invalid` — see allowed adapter values above.
 - `FATAL: CUSTOM_LLM_MODEL_ID is required` — set at least one model id.
 - `FATAL: openclaw rejected the config update` — schema validation failed; the offending batch JSON is printed below the error.
+- `FATAL: OPENCLAW_CONFIG_MIGRATION='...' is invalid` — use `check` or the one-time `apply-v2026.8.1` token.
+- `FATAL: existing OpenClaw config is invalid.` — default `check` printed the path-only plan and refused writes; follow the upgrade instructions above before opting in.
+- `FATAL: existing OpenClaw config is invalid but the v2026.8.1 migrator reports already migrated` — this invalid configuration is unsupported by the narrow migration. Do not set the apply token; use manual troubleshooting after preserving the config.
 
 To force a fully fresh config (loses any UI edits):
 ```bash

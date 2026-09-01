@@ -329,13 +329,13 @@ docker restart OpenClaw
 
 ### 已持久化的现有配置
 
-升级前，请创建并验证 OpenClaw Data 的备份。升级后的首次启动中，如果现有配置未通过验证，镜像会在模板管理的写入和首次启动初始化之前执行窄范围的备份优先迁移。它会创建带时间戳的 `openclaw.json.v2026.8.1-backup-*` 备份，验证迁移后的配置，然后在同一次启动中继续执行受管理的写入和初始化。如果迁移或验证失败，入口脚本会安全地失败关闭。
+升级前，请创建并验证 OpenClaw Data 的备份。仅更新镜像会检测需要迁移的持久化配置，绝不会在未 opt-in 的情况下应用迁移更改。`OPENCLAW_CONFIG_MIGRATION` 是高级环境变量，默认值为 `check`。对于无效的现有 `openclaw.json`，`check` 会运行窄范围迁移器。当它输出不含配置值的受影响路径计划时，启动会退出，不会修改配置或创建备份。原生校验仍为红色时，精确的 `already migrated` 结果不受支持，也不会进入受管理写入。
 
-OpenClaw 2.0 仍要求已签名的浏览器设备配对。请按照[浏览器设备配对等待批准](#浏览器设备配对等待批准)一节批准等待中的浏览器请求。
+如需一次性明确允许 v2026.8.1 迁移，请在 Unraid **Edit Container** 或 Compose 环境中设置 `OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1`，然后启动容器。迁移器会在写入前创建相邻的带时间戳备份 `openclaw.json.v2026.8.1-backup-*`，并输出准确的备份路径。检查该路径后，将 `OPENCLAW_CONFIG_MIGRATION` 还原为 `check`，再正常重启。后续配置有效的重启不需要该令牌。确认备份路径后请还原为 `check`：后续镜像只接受自己的版本限定令牌，并拒绝过期值。
 
-如需针对性排查，请在容器日志中查找 `[bootstrap] existing config needs OpenClaw migration; applying narrow backup-first migration`。不要将完整的 `openclaw doctor --fix` 用作常规升级恢复。它是在保留备份后使用的手动排查工具；入口脚本绝不会自动运行它。
+日志中的 `[bootstrap] existing config needs OpenClaw v2026.8.1 migration`、`dry run: planned changed paths` 以及包含 opt-in 说明的 FATAL 表示这是预期的安全拒绝。`FATAL: existing OpenClaw config is invalid but the v2026.8.1 migrator reports already migrated` 表示窄范围迁移无法修复这个无效配置；不要设置 apply 令牌。不要把完整的 `openclaw doctor --fix` 用作常规升级恢复。它仍是在保留备份后使用的手动排障工具；入口脚本绝不会自动运行它。
 
-如果容器已停止且无法运行镜像迁移器，请使用此仓库中的手动备用方法。在 Unraid 模板中找到 **OpenClaw Data** 的主机路径。不要将配置值粘贴到命令中。先运行 `python3 scripts/migrate-openclaw-2-config.py --config <OpenClaw-Data-主机路径>/openclaw.json`；该命令默认执行演练。确认输出后，添加 `--apply` 以执行迁移。该脚本会在相邻位置创建带时间戳、与原始文件逐字节相同的备份，并且只打印受影响的路径。
+如果容器已停止且无法运行镜像迁移器，请使用此仓库中的手动备用方法。在 Unraid 模板中找到 **OpenClaw Data** 的主机路径。不要将配置值粘贴到命令中。先运行 `python3 scripts/migrate-openclaw-2-config.py --config <OpenClaw-Data-host-path>/openclaw.json`；该命令默认执行演练。确认输出后，添加 `--apply` 以执行迁移。该脚本会在相邻位置创建带时间戳、与原始文件逐字节相同的备份，并且只打印受影响的路径。
 更新会保留已填写的值和自定义环境变量，但会丢弃明确已弃用的模板变量。`OPENCLAW_DISABLE_DEVICE_AUTH` 不再生效。
 
 
@@ -428,6 +428,9 @@ docker logs OpenClaw 2>&1 | tail -50
 - `FATAL: CUSTOM_LLM_API_TYPE='...' is invalid` —— 参见上方允许的适配器值。
 - `FATAL: CUSTOM_LLM_MODEL_ID is required` —— 至少设置一个模型 ID。
 - `FATAL: openclaw rejected the config update` —— schema 校验失败；错误下方会打印出有问题的批量 JSON。
+- `FATAL: OPENCLAW_CONFIG_MIGRATION='...' is invalid` —— 使用 `check` 或一次性的 `apply-v2026.8.1` 令牌。
+- `FATAL: existing OpenClaw config is invalid.` —— 默认 `check` 已输出受影响路径计划并拒绝写入；请先按上方升级说明操作，再选择 opt-in。
+- `FATAL: existing OpenClaw config is invalid but the v2026.8.1 migrator reports already migrated` —— 窄范围迁移不支持这个无效配置。不要设置 apply 令牌；保存配置后使用手动排障。
 
 强制重置为全新配置（会丢失 UI 中的所有编辑）：
 ```bash

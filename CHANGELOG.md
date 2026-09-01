@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **OpenClaw 2.0 migration warning.** Sessions and transcripts migrate to SQLite. Make a verified backup before upgrading. Before downgrading, use the current OpenClaw CLI to restore archived legacy transcript artifacts. See [OpenClaw's Updating guide](https://docs.openclaw.ai/install/updating).
 
-- **Persisted-config upgrade recovery.** On the first OpenClaw 2.0 start, an invalid existing configuration uses the image's narrow backup-first migrator before managed writes and first-boot seeding. It creates a timestamped `openclaw.json.v2026.8.1-backup-*` backup, validates the result, then continues the managed path in the same start. Migration or validation failure fails closed. Full `openclaw doctor --fix` remains manual troubleshooting, not entrypoint automation.
+- **Persisted-config migration consent.** Image updates now detect an invalid existing configuration without rewriting it: `OPENCLAW_CONFIG_MIGRATION=check` prints a value-free path-only plan, creates no backup, performs no managed writes, and exits. A reviewed one-start `apply-v2026.8.1` opt-in creates a timestamped, byte-for-byte `openclaw.json.v2026.8.1-backup-*` backup before the narrow agent-roster and `llm-task` compatibility migration. Later migrations require their own version-scoped token. Full `openclaw doctor --fix` remains manual troubleshooting, not entrypoint automation.
 
 - **Custom LLM first-boot seed.** Uses keyed `agents.entries.main.model` and preserves other agents and models.
 
