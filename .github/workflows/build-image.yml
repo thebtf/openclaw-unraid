@@ -176,6 +176,7 @@ jobs:
           restart_container=smoke-upgrade-restart
           volume=smoke-upgrade-config
           fixture_file=""
+          privacy_fixture_dir=""
           migration_required_marker='[bootstrap] existing config needs OpenClaw v2026.8.1 migration'
           migration_apply_marker='[bootstrap] applying narrow backup-first migration for OpenClaw v2026.8.1'
           check_plan_marker='dry run: planned changed paths'
@@ -187,6 +188,9 @@ jobs:
             docker rm -f "$restart_container" >/dev/null 2>&1 || true
             if [ -n "$fixture_file" ]; then
               rm -f "$fixture_file"
+            fi
+            if [ -n "$privacy_fixture_dir" ]; then
+              rm -rf "$privacy_fixture_dir"
             fi
             docker volume rm -f "$volume" >/dev/null 2>&1 || true
           }
@@ -218,8 +222,67 @@ jobs:
             done
             return 1
           }
+          assert_agent_id_redacted() {
+            fixture=$1
+            private_id=$2
+            expected_status=$3
+            if migration_output=$(docker run --rm \
+              --entrypoint /usr/local/bin/migrate-openclaw-2-config.py \
+              -v "$privacy_fixture_dir:/fixtures:ro" \
+              "$DERIVED_IMAGE:smoke" --config "/fixtures/$fixture" 2>&1); then
+              migration_status=0
+            else
+              migration_status=$?
+            fi
+            if [ "$migration_status" -ne "$expected_status" ]; then
+              echo "UPGRADE SMOKE FAIL: privacy migration probe returned an unexpected status" 1>&2
+              exit 1
+            fi
+            if printf '%s\n' "$migration_output" | grep -Fq "$private_id"; then
+              echo "UPGRADE SMOKE FAIL: path-only migration output disclosed a private agent ID" 1>&2
+              exit 1
+            fi
+          }
 
           docker volume create "$volume" >/dev/null
+          privacy_fixture_dir=$(mktemp -d)
+          cat > "$privacy_fixture_dir/legacy.json" <<'JSON'
+          {
+            "agents": {
+              "list": [
+                {
+                  "id": "private_legacy_agent",
+                  "memorySearch": { "provider": "auto" }
+                }
+              ]
+            }
+          }
+          JSON
+          cat > "$privacy_fixture_dir/keyed.json" <<'JSON'
+          {
+            "agents": {
+              "entries": {
+                "private_keyed_agent": {
+                  "memorySearch": { "provider": "auto" }
+                }
+              }
+            }
+          }
+          JSON
+          cat > "$privacy_fixture_dir/keyed-invalid.json" <<'JSON'
+          {
+            "agents": {
+              "entries": {
+                "private_keyed_agent": {
+                  "memorySearch": "invalid"
+                }
+              }
+            }
+          }
+          JSON
+          assert_agent_id_redacted legacy.json private_legacy_agent 0
+          assert_agent_id_redacted keyed.json private_keyed_agent 0
+          assert_agent_id_redacted keyed-invalid.json private_keyed_agent 1
           fixture_file=$(mktemp)
           cat > "$fixture_file" <<'JSON'
           {

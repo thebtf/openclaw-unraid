@@ -212,8 +212,8 @@ def _validate_configuration(root: Any) -> Optional[LegacyAllowedModels]:
                         _validate_memory_search(memory["search"], entry_path + ".memory.search")
         if "entries" in agents:
             named_entries = _expect_object(agents["entries"], "agents.entries")
-            for name, entry in named_entries.items():
-                entry_path = "agents.entries." + name
+            for entry in named_entries.values():
+                entry_path = "agents.entries.*"
                 entry_object = _expect_object(entry, entry_path)
                 if "memorySearch" in entry_object:
                     _validate_memory_search(entry_object["memorySearch"], entry_path + ".memorySearch")
@@ -384,10 +384,15 @@ def _migrate_agent_memory_searches(root: Dict[str, Any], changes: ChangeLog) -> 
     if not isinstance(agents, dict):
         return
 
+    legacy_entries = agents.get("list")
+    if isinstance(legacy_entries, list):
+        for index, entry in enumerate(legacy_entries):
+            _migrate_agent_memory_search(entry, "agents.list[{}]".format(index), changes)
+
     named_entries = agents.get("entries")
     if isinstance(named_entries, dict):
-        for name, entry in named_entries.items():
-            _migrate_agent_memory_search(entry, "agents.entries." + name, changes)
+        for entry in named_entries.values():
+            _migrate_agent_memory_search(entry, "agents.entries.*", changes)
 
 
 def _migrate_agent_defaults(root: Dict[str, Any], changes: ChangeLog) -> None:
@@ -478,8 +483,8 @@ def _migrate(root: Dict[str, Any], normalized_models: Optional[LegacyAllowedMode
     memory = root.get("memory")
     if isinstance(memory, dict) and "search" in memory:
         _migrate_memory_search_settings(memory["search"], "memory.search", changes)
-    _migrate_agent_roster(root, changes)
     _migrate_agent_memory_searches(root, changes)
+    _migrate_agent_roster(root, changes)
     _migrate_agent_defaults(root, changes)
     _migrate_gateway_controls(root, changes)
     _migrate_llm_task(root, normalized_models, changes)
@@ -564,15 +569,14 @@ def _assert_legacy_paths_absent(
         _assert_agent_roster_invariants(agents, converted_legacy_list)
         named_entries = agents.get("entries")
         if isinstance(named_entries, dict):
-            for name, entry in named_entries.items():
+            for entry in named_entries.values():
                 if isinstance(entry, dict) and "memorySearch" in entry:
                     raise MigrationError(
-                        "migration invariant failed: legacy path remains: agents.entries."
-                        + name
-                        + ".memorySearch"
+                        "migration invariant failed: legacy path remains: "
+                        "agents.entries.*.memorySearch"
                     )
                 if isinstance(entry, dict):
-                    _assert_canonical_agent_memory_search(entry, "agents.entries." + name)
+                    _assert_canonical_agent_memory_search(entry, "agents.entries.*")
 
 
     gateway = root.get("gateway")
