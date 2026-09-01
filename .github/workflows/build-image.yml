@@ -163,6 +163,140 @@ jobs:
           echo "SMOKE OK"
           docker rm -f smoke >/dev/null
 
+      # PERSISTED-CONFIG UPGRADE GATE: a legacy persisted config must receive
+      # the entrypoint's narrow backup-first migration before template-managed
+      # writes and first-boot seeding proceed.
+      - name: Persisted-config upgrade smoke
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          set -eu
+          container=smoke-upgrade
+          volume=smoke-upgrade-config
+          handoff_marker='[bootstrap] existing config needs OpenClaw migration; applying narrow backup-first migration'
+
+          cleanup() {
+            docker rm -f "$container" >/dev/null 2>&1 || true
+            docker volume rm -f "$volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          docker volume create "$volume" >/dev/null
+          docker run --rm -i \
+            --entrypoint /bin/sh \
+            -v "$volume:/home/node/.openclaw" \
+            "$DERIVED_IMAGE:smoke" \
+            -ceu 'mkdir -p /home/node/.openclaw && cat > /home/node/.openclaw/openclaw.json' <<'JSON'
+          {
+            "meta": {
+              "lastTouchedAt": "2026-08-01T00:00:00.000Z"
+            },
+            "gateway": {
+              "mode": "local",
+              "bind": "lan",
+              "controlUi": {
+                "allowedOrigins": ["http://127.0.0.1:18789"],
+                "allowInsecureAuth": true,
+                "dangerouslyDisableDeviceAuth": true
+              },
+              "auth": { "mode": "token" }
+            },
+            "agents": {
+              "defaults": {
+                "memorySearch": { "enabled": false },
+                "imageGenerationModel": { "primary": "openai/gpt-image-2" },
+                "mediaGenerationAutoProviderFallback": false,
+                "compaction": { "truncateAfterCompaction": false }
+              }
+            },
+            "env": {
+              "vars": {
+                "PERSISTED_CONFIG_UPGRADE_SENTINEL": "preserve-me"
+              }
+            }
+          }
+          JSON
+
+          docker run -d --name "$container" \
+            -v "$volume:/home/node/.openclaw" \
+            -e PUID=1234 -e PGID=1000 \
+            -e OPENCLAW_GATEWAY_TOKEN=upgrade-smoke-token \
+            -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
+            -e CUSTOM_LLM_BASE_URL=http://127.0.0.1:9/v1 \
+            -e CUSTOM_LLM_API_KEY=upgrade-smoke \
+            -e CUSTOM_LLM_API_TYPE=openai-completions \
+            -e CUSTOM_LLM_MODEL_ID=upgrade-smoke-model \
+            "$DERIVED_IMAGE:smoke"
+
+          gateway_ready() {
+            docker exec "$container" node -e 'fetch("http://127.0.0.1:18789/readyz", { signal: AbortSignal.timeout(2000) }).then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))'
+          }
+
+          handoff_seen=""
+          ready=""
+          for _ in $(seq 1 24); do
+            if [ "$(docker inspect -f '{{.State.Running}}' "$container")" != "true" ]; then
+              break
+            fi
+            if docker logs "$container" 2>&1 | grep -Fqx "$handoff_marker"; then
+              handoff_seen=1
+            fi
+            if [ -n "$handoff_seen" ] && gateway_ready; then
+              ready=1
+              break
+            fi
+            sleep 5
+          done
+
+          echo "--- persisted-config upgrade log ---"
+          docker logs "$container" 2>&1 | tail -80
+          if [ -z "$handoff_seen" ]; then
+            echo "UPGRADE SMOKE FAIL: bootstrap never emitted the persisted-config migration handoff marker" 1>&2
+            exit 1
+          fi
+          if [ -z "$ready" ] || [ "$(docker inspect -f '{{.State.Running}}' "$container")" != "true" ]; then
+            echo "UPGRADE SMOKE FAIL: gateway never became ready and alive after persisted-config migration" 1>&2
+            exit 1
+          fi
+
+          if ! docker exec "$container" test -e /home/node/.openclaw/.unraid-template-seeded; then
+            echo "UPGRADE SMOKE FAIL: first-boot template seed did not run after persisted-config migration" 1>&2
+            exit 1
+          fi
+          docker exec "$container" node -e '
+            const fs = require("node:fs");
+            const configDir = "/home/node/.openclaw";
+            const fail = (message) => { console.error(`UPGRADE SMOKE FAIL: ${message}`); process.exit(1); };
+            const backups = fs.readdirSync(configDir).filter((name) => /^openclaw\.json\.v2026\.8\.1-backup-.+/.test(name));
+            if (backups.length === 0) fail("narrow migration backup missing");
+            const backupPath = `${configDir}/${backups[0]}`;
+            if (!fs.statSync(backupPath).isFile() || fs.statSync(backupPath).size === 0) fail("narrow migration backup is empty");
+            const backup = JSON.parse(fs.readFileSync(backupPath, "utf8"));
+            if (backup.meta?.lastTouchedAt !== "2026-08-01T00:00:00.000Z") fail("migration backup did not preserve meta.lastTouchedAt");
+            if (backup.gateway?.controlUi?.allowInsecureAuth !== true) fail("migration backup did not preserve allowInsecureAuth");
+            if (backup.gateway?.controlUi?.dangerouslyDisableDeviceAuth !== true) fail("migration backup did not preserve dangerouslyDisableDeviceAuth");
+            if (backup.agents?.defaults?.memorySearch?.enabled !== false) fail("migration backup did not preserve memorySearch");
+            if (backup.agents?.defaults?.imageGenerationModel?.primary !== "openai/gpt-image-2") fail("migration backup did not preserve imageGenerationModel");
+            if (backup.agents?.defaults?.mediaGenerationAutoProviderFallback !== false) fail("migration backup did not preserve mediaGenerationAutoProviderFallback");
+            if (backup.agents?.defaults?.compaction?.truncateAfterCompaction !== false) fail("migration backup did not preserve truncateAfterCompaction");
+            if (backup.env?.vars?.PERSISTED_CONFIG_UPGRADE_SENTINEL !== "preserve-me") fail("migration backup did not preserve the sentinel");
+          '
+          docker exec "$container" node -e '
+            const fs = require("node:fs");
+            const config = JSON.parse(fs.readFileSync("/home/node/.openclaw/openclaw.json", "utf8"));
+            const fail = (message) => { console.error(`UPGRADE SMOKE FAIL: ${message}`); process.exit(1); };
+            if (config.meta?.lastTouchedAt !== undefined) fail("retired meta.lastTouchedAt remains");
+            if (config.gateway?.controlUi?.allowInsecureAuth !== undefined) fail("retired gateway.controlUi.allowInsecureAuth remains");
+            if (config.gateway?.controlUi?.dangerouslyDisableDeviceAuth !== undefined) fail("retired gateway.controlUi.dangerouslyDisableDeviceAuth remains");
+            if (config.agents?.defaults?.memorySearch !== undefined) fail("legacy agents.defaults.memorySearch remains");
+            if (config.memory?.search?.enabled !== false) fail("agents.defaults.memorySearch was not moved to memory.search");
+            if (config.agents?.defaults?.imageGenerationModel !== undefined) fail("legacy agents.defaults.imageGenerationModel remains");
+            if (config.agents?.defaults?.mediaModels?.image?.primary !== "openai/gpt-image-2") fail("imageGenerationModel was not moved to agents.defaults.mediaModels.image");
+            if (config.agents?.defaults?.mediaGenerationAutoProviderFallback !== undefined) fail("retired agents.defaults.mediaGenerationAutoProviderFallback remains");
+            if (config.agents?.defaults?.compaction?.truncateAfterCompaction !== undefined) fail("retired agents.defaults.compaction.truncateAfterCompaction remains");
+            if (config.env?.vars?.PERSISTED_CONFIG_UPGRADE_SENTINEL !== "preserve-me") fail("preservation sentinel changed during migration");
+          '
+          echo "PERSISTED-CONFIG UPGRADE SMOKE OK"
+
       # Push happens only after the smoke gate passed (cache hit — instant).
       - name: Push
         if: steps.gate.outputs.build == 'true'

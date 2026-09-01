@@ -36,7 +36,8 @@ ENV HOME=/home/node \
 USER root
 
 COPY docker/unraid-entrypoint.sh /usr/local/bin/unraid-entrypoint.sh
-RUN chmod 755 /usr/local/bin/unraid-entrypoint.sh
+COPY scripts/migrate-openclaw-2-config.py /usr/local/bin/migrate-openclaw-2-config.py
+RUN chmod 755 /usr/local/bin/unraid-entrypoint.sh /usr/local/bin/migrate-openclaw-2-config.py
 
 # mcporter: MCP-client CLI consumed by the bundled `mcporter` skill
 # (/app/skills/mcporter requires the `mcporter` bin). Baked into the image so
