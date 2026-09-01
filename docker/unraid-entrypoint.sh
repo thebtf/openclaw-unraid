@@ -371,7 +371,9 @@ preflight_supported_migration() {
     candidate_preflight_failed "narrow OpenClaw v2026.8.1 candidate migration did not confirm an applied migration."
     return 1
   fi
-  if ! run_as_puid_with_home "$MIGRATION_CANDIDATE_HOME" node /app/dist/index.js config validate >/dev/null 2>&1; then
+  # Validate the private candidate config while retaining the persisted plugin
+  # registry and state that native validation may need to resolve entries.
+  if ! run_as_puid env OPENCLAW_CONFIG_PATH="$MIGRATION_CANDIDATE_CFG" node /app/dist/index.js config validate >/dev/null 2>&1; then
     candidate_preflight_failed "candidate migration failed native OpenClaw validation."
     return 1
   fi
