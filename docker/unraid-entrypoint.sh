@@ -44,14 +44,19 @@ case "$PGID" in
   ''|*[!0-9]*) echo "[bootstrap] FATAL: PGID='$PGID' must be numeric." 1>&2; exit 1 ;;
 esac
 
-# Version-scoped persisted-config migration is opt-in. Reject invalid values
-# before user or filesystem mutation.
-CONFIG_MIGRATION_MODE="${OPENCLAW_CONFIG_MIGRATION:-check}"
+# Persisted-config migration defaults to the narrow, version-scoped automatic path.
+# `check` was published before `auto` became the safe default, so existing
+# container settings retain it as a deprecated compatibility alias.
+CONFIG_MIGRATION_MODE="${OPENCLAW_CONFIG_MIGRATION:-auto}"
 case "$CONFIG_MIGRATION_MODE" in
-  check|apply-v2026.8.1)
+  auto|dry-run|apply-v2026.8.1)
+    ;;
+  check)
+    echo "[bootstrap] WARNING: OPENCLAW_CONFIG_MIGRATION=check is deprecated and now behaves as auto. Use dry-run for a no-write, no-backup inspection." 1>&2
+    CONFIG_MIGRATION_MODE=auto
     ;;
   *)
-    echo "[bootstrap] FATAL: OPENCLAW_CONFIG_MIGRATION='$CONFIG_MIGRATION_MODE' is invalid. Expected check or apply-v2026.8.1." 1>&2
+    echo "[bootstrap] FATAL: OPENCLAW_CONFIG_MIGRATION='$CONFIG_MIGRATION_MODE' is invalid. Expected auto, dry-run, or apply-v2026.8.1; check is a deprecated compatibility alias for auto." 1>&2
     exit 1
     ;;
 esac
@@ -264,11 +269,48 @@ fi
 # rewritten openclaw.json keeps PUID ownership (no re-chown dance), and
 # plugin-discovery ownership checks evaluate against the same uid the
 # gateway will run as.
-run_as_puid() {
+run_as_puid_with_home() {
+  home=$1
+  shift
   setpriv --reuid="$PUID" --regid="$PGID" --init-groups \
-    env HOME=/home/node PATH="$PATH" "$@"
+    env HOME="$home" OPENCLAW_HOME="$home" OPENCLAW_STATE_DIR="$home/.openclaw" \
+    OPENCLAW_CONFIG_PATH="$home/.openclaw/openclaw.json" OPENCLAW_CONFIG_DIR="$home/.openclaw" \
+    OPENCLAW_WORKSPACE_DIR="$home/.openclaw/workspace" PATH="$PATH" "$@"
 }
+
+run_as_puid() {
+  run_as_puid_with_home /home/node "$@"
+}
+
 CONFIG_RECOVERY_ATTEMPTED=0
+MIGRATION_BACKUP_PATH=
+MIGRATION_CANDIDATE_DIR=
+
+# The candidate root stays root-owned and unreadable. Its group-search bit
+# lets the PUID process reach its own 0700 HOME without exposing contents.
+cleanup_migration_candidate() {
+  if [ -n "$MIGRATION_CANDIDATE_DIR" ]; then
+    rm -rf "$MIGRATION_CANDIDATE_DIR" || return 1
+    if [ -e "$MIGRATION_CANDIDATE_DIR" ]; then
+      return 1
+    fi
+    MIGRATION_CANDIDATE_DIR=
+  fi
+}
+
+# Explicit cleanup below is required before real apply; this catches any
+# ordinary exit path that interrupts candidate preparation.
+trap 'cleanup_migration_candidate' 0
+
+candidate_preflight_failed() {
+  message=$1
+  if ! cleanup_migration_candidate; then
+    echo "[bootstrap] FATAL: temporary migration candidate cleanup failed. The real config was left byte-identical and no migration backup was created. Refusing managed writes." 1>&2
+  else
+    echo "[bootstrap] FATAL: $message The real config was left byte-identical and no migration backup was created. Preserve openclaw.json and recover it manually; do not run broad doctor --fix as an automatic upgrade step. Refusing managed writes." 1>&2
+  fi
+  return 1
+}
 
 exec_gateway() {
   echo "[bootstrap] dropping privileges to $PUID:$PGID and starting gateway"
@@ -277,43 +319,120 @@ exec_gateway() {
     node /app/dist/index.js gateway --bind lan --auth token
 }
 
-# An invalid persisted config has a version-scoped operator boundary before
-# template-managed writes. An already-migrated result with native validation
-# still red is unsupported and must not reach managed writes.
+# Native validation is authoritative. The migrator only handles the exact
+# v2026.8.1 legacy and partial shapes it can plan without reading values.
+plan_supported_migration() {
+  if ! MIGRATION_PLAN=$(run_as_puid python3 /usr/local/bin/migrate-openclaw-2-config.py --config "$CFG"); then
+    echo "[bootstrap] FATAL: existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape. It was left byte-identical and no migration backup was created. Preserve openclaw.json and recover it manually; do not run broad doctor --fix as an automatic upgrade step. Refusing managed writes." 1>&2
+    return 1
+  fi
+
+  printf '%s\n' "$MIGRATION_PLAN"
+  if printf '%s\n' "$MIGRATION_PLAN" | grep -Fqx 'already migrated'; then
+    echo "[bootstrap] FATAL: existing OpenClaw config is invalid but the v2026.8.1 migrator reports already migrated. It was left byte-identical and no migration backup was created because this invalid configuration is unsupported. Preserve openclaw.json and recover it manually. Refusing managed writes." 1>&2
+    return 1
+  fi
+  if ! printf '%s\n' "$MIGRATION_PLAN" | grep -Fqx 'dry run: planned changed paths'; then
+    echo "[bootstrap] FATAL: narrow OpenClaw v2026.8.1 migration did not produce a supported plan. It was left byte-identical and no migration backup was created. Preserve openclaw.json and recover it manually. Refusing managed writes." 1>&2
+    return 1
+  fi
+}
+
+# Apply and validate only a private copy first. Its backup and all candidate
+# artifacts are removed before the real config is eligible for backup/apply.
+preflight_supported_migration() {
+  if ! MIGRATION_CANDIDATE_DIR=$(mktemp -d /tmp/openclaw-migration.XXXXXX); then
+    echo "[bootstrap] FATAL: could not create a private temporary migration candidate. The real config was left byte-identical and no migration backup was created. Refusing managed writes." 1>&2
+    return 1
+  fi
+
+  MIGRATION_CANDIDATE_HOME="$MIGRATION_CANDIDATE_DIR/home/node"
+  MIGRATION_CANDIDATE_CFG="$MIGRATION_CANDIDATE_HOME/.openclaw/openclaw.json"
+  if ! chown "0:$PGID" "$MIGRATION_CANDIDATE_DIR" || \
+     ! chmod 0710 "$MIGRATION_CANDIDATE_DIR" || \
+     ! mkdir -p "$MIGRATION_CANDIDATE_HOME/.openclaw/workspace" || \
+     ! cp "$CFG" "$MIGRATION_CANDIDATE_CFG" || \
+     ! cmp -s "$CFG" "$MIGRATION_CANDIDATE_CFG" || \
+     ! chown -R "$PUID:$PGID" "$MIGRATION_CANDIDATE_HOME" || \
+     ! chmod 0700 "$MIGRATION_CANDIDATE_HOME" "$MIGRATION_CANDIDATE_HOME/.openclaw"; then
+    candidate_preflight_failed "could not prepare a private byte-identical migration candidate."
+    return 1
+  fi
+
+  if ! CANDIDATE_MIGRATION_RESULT=$(run_as_puid_with_home "$MIGRATION_CANDIDATE_HOME" python3 /usr/local/bin/migrate-openclaw-2-config.py --config "$MIGRATION_CANDIDATE_CFG" --apply 2>&1); then
+    candidate_preflight_failed "existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape."
+    return 1
+  fi
+  if printf '%s\n' "$CANDIDATE_MIGRATION_RESULT" | grep -Fqx 'already migrated'; then
+    candidate_preflight_failed "existing OpenClaw config is invalid but the v2026.8.1 migrator reports already migrated because this invalid configuration is unsupported."
+    return 1
+  fi
+  if ! printf '%s\n' "$CANDIDATE_MIGRATION_RESULT" | grep -Fqx 'applied migration'; then
+    candidate_preflight_failed "narrow OpenClaw v2026.8.1 candidate migration did not confirm an applied migration."
+    return 1
+  fi
+  # Validate the private candidate config while retaining the persisted plugin
+  # registry and state that native validation may need to resolve entries.
+  if ! run_as_puid env OPENCLAW_CONFIG_PATH="$MIGRATION_CANDIDATE_CFG" node /app/dist/index.js config validate >/dev/null 2>&1; then
+    candidate_preflight_failed "candidate migration failed native OpenClaw validation."
+    return 1
+  fi
+  if ! cleanup_migration_candidate; then
+    echo "[bootstrap] FATAL: temporary migration candidate cleanup failed. The real config was left byte-identical and no migration backup was created. Refusing managed writes." 1>&2
+    return 1
+  fi
+  unset CANDIDATE_MIGRATION_RESULT
+  echo "[bootstrap] candidate migration passed native OpenClaw validation"
+}
+
+apply_supported_migration() {
+  if ! MIGRATION_RESULT=$(run_as_puid python3 /usr/local/bin/migrate-openclaw-2-config.py --config "$CFG" --apply); then
+    echo "[bootstrap] FATAL: supported OpenClaw v2026.8.1 migration could not complete atomically. Inspect the migrator output and any printed backup path, then recover manually. Refusing managed writes." 1>&2
+    exit 1
+  fi
+
+  printf '%s\n' "$MIGRATION_RESULT"
+  if ! printf '%s\n' "$MIGRATION_RESULT" | grep -Fqx 'applied migration'; then
+    echo "[bootstrap] FATAL: narrow OpenClaw v2026.8.1 migration did not confirm an applied migration. Refusing managed writes." 1>&2
+    exit 1
+  fi
+  MIGRATION_BACKUP_PATH=$(printf '%s\n' "$MIGRATION_RESULT" | sed -n 's/^backup: //p' | sed -n '1p')
+  if [ -z "$MIGRATION_BACKUP_PATH" ]; then
+    echo "[bootstrap] FATAL: narrow OpenClaw v2026.8.1 migration did not report its backup path. Refusing managed writes." 1>&2
+    exit 1
+  fi
+}
+
 if [ "$CONFIG_EXISTED" = "1" ]; then
   if ! run_as_puid node /app/dist/index.js config validate >/dev/null 2>&1; then
     echo "[bootstrap] existing config needs OpenClaw v2026.8.1 migration"
     case "$CONFIG_MIGRATION_MODE" in
-      check)
-        echo "[bootstrap] running narrow OpenClaw v2026.8.1 migration check"
-        if ! MIGRATION_RESULT=$(run_as_puid /usr/local/bin/migrate-openclaw-2-config.py --config "$CFG"); then
-          echo "[bootstrap] FATAL: narrow OpenClaw v2026.8.1 migration check failed; refusing managed writes." 1>&2
+      dry-run)
+        echo "[bootstrap] running narrow OpenClaw v2026.8.1 migration dry-run"
+        if ! plan_supported_migration; then
           exit 1
         fi
+        echo "[bootstrap] FATAL: existing OpenClaw config needs a supported v2026.8.1 migration. OPENCLAW_CONFIG_MIGRATION=dry-run is inspection-only; it left the config byte-identical and created no backup. Restart with OPENCLAW_CONFIG_MIGRATION=auto (the default) to apply it, or use OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1 as an advanced explicit apply. Refusing managed writes." 1>&2
+        exit 1
+        ;;
+      auto)
+        if ! preflight_supported_migration; then
+          exit 1
+        fi
+        echo "[bootstrap] auto-applying supported backup-first OpenClaw v2026.8.1 migration"
         ;;
       apply-v2026.8.1)
-        echo "[bootstrap] applying narrow backup-first migration for OpenClaw v2026.8.1"
-        if ! MIGRATION_RESULT=$(run_as_puid /usr/local/bin/migrate-openclaw-2-config.py --config "$CFG" --apply); then
-          echo "[bootstrap] FATAL: narrow OpenClaw v2026.8.1 migration failed; refusing managed writes." 1>&2
+        if ! preflight_supported_migration; then
           exit 1
         fi
+        echo "[bootstrap] applying narrow backup-first migration for OpenClaw v2026.8.1"
         ;;
     esac
 
-    printf '%s\n' "$MIGRATION_RESULT"
-    if printf '%s\n' "$MIGRATION_RESULT" | grep -Fqx 'already migrated'; then
-      echo "[bootstrap] FATAL: existing OpenClaw config is invalid but the v2026.8.1 migrator reports already migrated; this invalid configuration is unsupported. Refusing managed writes." 1>&2
-      exit 1
-    fi
-    if [ "$CONFIG_MIGRATION_MODE" = "check" ]; then
-      echo "[bootstrap] FATAL: existing OpenClaw config is invalid. Review the printed path-only plan, then set OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1 for one start. After that start, verify the printed backup path and return OPENCLAW_CONFIG_MIGRATION to check. Refusing managed writes." 1>&2
-      exit 1
-    fi
+    apply_supported_migration
     CONFIG_RECOVERY_ATTEMPTED=1
-  else
-    if [ "$CONFIG_MIGRATION_MODE" = "apply-v2026.8.1" ]; then
-      echo "[bootstrap] WARNING: OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1 is no longer needed for this valid existing config. Return it to check before the next image update." 1>&2
-    fi
+  elif [ "$CONFIG_MIGRATION_MODE" = "apply-v2026.8.1" ]; then
+    echo "[bootstrap] WARNING: OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1 is no longer needed for this valid existing config. Return it to auto before the next image update." 1>&2
   fi
 fi
 
@@ -344,7 +463,7 @@ fi
 
 if [ "$CONFIG_RECOVERY_ATTEMPTED" = "1" ]; then
   if ! run_as_puid node /app/dist/index.js config validate >/dev/null 2>&1; then
-    echo "[bootstrap] FATAL: OpenClaw config remains invalid after narrow migration and managed-key update; refusing startup." 1>&2
+    echo "[bootstrap] FATAL: OpenClaw config remains invalid after narrow migration and managed-key update. Restore from: $MIGRATION_BACKUP_PATH. Refusing startup." 1>&2
     exit 1
   fi
 fi

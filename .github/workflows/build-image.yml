@@ -166,37 +166,60 @@ jobs:
           echo "SMOKE OK"
           docker rm -f smoke >/dev/null
 
-      # PERSISTED-CONFIG UPGRADE GATE: the default check must preserve an
-      # invalid persisted config byte-for-byte; one explicit, version-scoped
-      # apply may migrate it before managed writes and a later normal restart.
-      # This gate uses the image-native UID so check/apply/restart tests measure
-      # migration behavior only; the dedicated smoke above owns PUID remap coverage.
+      # PERSISTED-CONFIG UPGRADE GATE: a persisted legacy `check` setting must
+      # promote to auto and reach readiness; explicit `dry-run` must leave the
+      # legacy fixture untouched; default auto must migrate legacy and partial
+      # shapes backup-first only after candidate validation; a mixed config
+      # that migrates narrowly but fails native validation must refuse safely.
+      # This gate uses the image-native UID so migration behavior is isolated;
+      # the dedicated smoke above retains the PUID remap budget.
       - name: Persisted-config upgrade smoke
         if: steps.gate.outputs.build == 'true'
         run: |
           set -eu
-          check_container=smoke-upgrade-check
-          apply_container=smoke-upgrade-apply
+          legacy_check_container=smoke-upgrade-legacy-check
+          dry_run_container=smoke-upgrade-dry-run
+          auto_container=smoke-upgrade-auto
           restart_container=smoke-upgrade-restart
-          volume=smoke-upgrade-config
+          partial_container=smoke-upgrade-partial
+          mixed_invalid_container=smoke-upgrade-mixed-invalid
+          legacy_check_volume=smoke-upgrade-legacy-check-config
+          dry_run_volume=smoke-upgrade-dry-run-config
+          auto_volume=smoke-upgrade-auto-config
+          partial_volume=smoke-upgrade-partial-config
+          mixed_invalid_volume=smoke-upgrade-mixed-invalid-config
           fixture_file=""
+          partial_fixture_file=""
+          mixed_invalid_fixture_file=""
           privacy_fixture_dir=""
           migration_required_marker='[bootstrap] existing config needs OpenClaw v2026.8.1 migration'
-          migration_apply_marker='[bootstrap] applying narrow backup-first migration for OpenClaw v2026.8.1'
-          check_plan_marker='dry run: planned changed paths'
-          check_opt_in_marker='OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1'
+          migration_auto_marker='[bootstrap] auto-applying supported backup-first OpenClaw v2026.8.1 migration'
+          legacy_check_compatibility_marker='OPENCLAW_CONFIG_MIGRATION=check is deprecated and now behaves as auto'
+          candidate_validated_marker='[bootstrap] candidate migration passed native OpenClaw validation'
+          dry_run_plan_marker='dry run: planned changed paths'
+          dry_run_refusal_marker='OPENCLAW_CONFIG_MIGRATION=dry-run is inspection-only'
+          candidate_validation_marker='candidate migration failed native OpenClaw validation'
 
           cleanup() {
-            docker rm -f "$check_container" >/dev/null 2>&1 || true
-            docker rm -f "$apply_container" >/dev/null 2>&1 || true
+            docker rm -f "$legacy_check_container" >/dev/null 2>&1 || true
+            docker rm -f "$dry_run_container" >/dev/null 2>&1 || true
+            docker rm -f "$auto_container" >/dev/null 2>&1 || true
             docker rm -f "$restart_container" >/dev/null 2>&1 || true
+            docker rm -f "$partial_container" >/dev/null 2>&1 || true
+            docker rm -f "$mixed_invalid_container" >/dev/null 2>&1 || true
             if [ -n "$fixture_file" ]; then
               rm -f "$fixture_file"
+            fi
+            if [ -n "$partial_fixture_file" ]; then
+              rm -f "$partial_fixture_file"
+            fi
+            if [ -n "$mixed_invalid_fixture_file" ]; then
+              rm -f "$mixed_invalid_fixture_file"
             fi
             if [ -n "$privacy_fixture_dir" ]; then
               rm -rf "$privacy_fixture_dir"
             fi
-            docker volume rm -f "$volume" >/dev/null 2>&1 || true
+            docker volume rm -f "$legacy_check_volume" "$dry_run_volume" "$auto_volume" "$partial_volume" "$mixed_invalid_volume" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
 
@@ -248,7 +271,11 @@ jobs:
             fi
           }
 
-          docker volume create "$volume" >/dev/null
+          docker volume create "$legacy_check_volume" >/dev/null
+          docker volume create "$dry_run_volume" >/dev/null
+          docker volume create "$auto_volume" >/dev/null
+          docker volume create "$partial_volume" >/dev/null
+          docker volume create "$mixed_invalid_volume" >/dev/null
           privacy_fixture_dir=$(mktemp -d)
           cat > "$privacy_fixture_dir/legacy.json" <<'JSON'
           {
@@ -336,100 +363,229 @@ jobs:
           }
           JSON
 
-          docker run --rm -i \
-            --entrypoint /bin/sh \
-            -v "$volume:/home/node/.openclaw" \
-            "$DERIVED_IMAGE:smoke" \
-            -ceu 'mkdir -p /home/node/.openclaw && cat > /home/node/.openclaw/openclaw.json' < "$fixture_file"
+          partial_fixture_file=$(mktemp)
+          cat > "$partial_fixture_file" <<'JSON'
+          {
+            "gateway": {
+              "mode": "local",
+              "bind": "lan",
+              "controlUi": {
+                "allowedOrigins": ["http://127.0.0.1:18789"]
+              },
+              "auth": { "mode": "token" }
+            },
+            "agents": {
+              "entries": {
+                "main": {
+                  "memorySearch": { "provider": "auto" }
+                }
+              }
+            },
+            "env": {
+              "vars": {
+                "PERSISTED_CONFIG_PARTIAL_SENTINEL": "preserve-me"
+              }
+            }
+          }
+          JSON
 
-          docker run -d --name "$check_container" \
-            -v "$volume:/home/node/.openclaw" \
+          mixed_invalid_fixture_file=$(mktemp)
+          cat > "$mixed_invalid_fixture_file" <<'JSON'
+          {
+            "gateway": {
+              "mode": "local",
+              "bind": "lan",
+              "controlUi": {
+                "allowedOrigins": ["http://127.0.0.1:18789"]
+              },
+              "auth": { "mode": 99 }
+            },
+            "agents": {
+              "entries": {
+                "main": {
+                  "memorySearch": { "provider": "auto" }
+                }
+              }
+            },
+            "env": {
+              "vars": {
+                "PERSISTED_CONFIG_MIXED_INVALID_SENTINEL": "preserve-me"
+              }
+            }
+          }
+          JSON
+
+          seed_fixture() {
+            target_volume=$1
+            fixture=$2
+            docker run --rm -i \
+              --entrypoint /bin/sh \
+              -v "$target_volume:/home/node/.openclaw" \
+              "$DERIVED_IMAGE:smoke" \
+              -ceu 'mkdir -p /home/node/.openclaw && cat > /home/node/.openclaw/openclaw.json' < "$fixture"
+          }
+
+          seed_fixture "$legacy_check_volume" "$fixture_file"
+          seed_fixture "$dry_run_volume" "$fixture_file"
+          seed_fixture "$auto_volume" "$fixture_file"
+          seed_fixture "$partial_volume" "$partial_fixture_file"
+          seed_fixture "$mixed_invalid_volume" "$mixed_invalid_fixture_file"
+
+          docker run -d --name "$legacy_check_container" \
+            -v "$legacy_check_volume:/home/node/.openclaw" \
             -e PUID=1000 -e PGID=1000 \
+            -e OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 \
             -e OPENCLAW_GATEWAY_TOKEN=upgrade-smoke-token \
             -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
+            -e OPENCLAW_CONFIG_MIGRATION=check \
             -e CUSTOM_LLM_BASE_URL=http://127.0.0.1:9/v1 \
             -e CUSTOM_LLM_API_KEY=upgrade-smoke \
             -e CUSTOM_LLM_API_TYPE=openai-completions \
             -e CUSTOM_LLM_MODEL_ID=upgrade-smoke-model \
             "$DERIVED_IMAGE:smoke"
 
-          if ! wait_for_exit "$check_container"; then
-            echo "UPGRADE SMOKE FAIL: default migration check did not refuse startup" 1>&2
-            docker logs "$check_container" 2>&1 || true
+          if ! wait_for_ready "$legacy_check_container"; then
+            echo "UPGRADE SMOKE FAIL: legacy persisted check did not reach readiness through auto compatibility" 1>&2
+            docker logs "$legacy_check_container" 2>&1 || true
             exit 1
           fi
-          check_exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$check_container")
-          check_log=$(docker logs "$check_container" 2>&1 || true)
-          echo "--- persisted-config check-only log ---"
-          printf '%s\n' "$check_log"
-          if [ "$check_exit_code" = "0" ]; then
-            echo "UPGRADE SMOKE FAIL: default migration check exited successfully" 1>&2
+          legacy_check_log=$(docker logs "$legacy_check_container" 2>&1 || true)
+          echo "--- persisted-config legacy-check compatibility log ---"
+          printf '%s\n' "$legacy_check_log"
+          if ! printf '%s\n' "$legacy_check_log" | grep -Fq "$legacy_check_compatibility_marker"; then
+            echo "UPGRADE SMOKE FAIL: legacy persisted check omitted its compatibility warning" 1>&2
             exit 1
           fi
-          if ! printf '%s\n' "$check_log" | grep -Fq "$migration_required_marker"; then
-            echo "UPGRADE SMOKE FAIL: default migration check omitted the migration-required log" 1>&2
+          if ! printf '%s\n' "$legacy_check_log" | grep -Fq "$migration_required_marker"; then
+            echo "UPGRADE SMOKE FAIL: legacy persisted check omitted the migration-required log" 1>&2
             exit 1
           fi
-          if ! printf '%s\n' "$check_log" | grep -Fq "$check_plan_marker"; then
-            echo "UPGRADE SMOKE FAIL: default migration check omitted the path-only plan" 1>&2
+          if ! printf '%s\n' "$legacy_check_log" | grep -Fq "$candidate_validated_marker"; then
+            echo "UPGRADE SMOKE FAIL: legacy persisted check did not validate its candidate" 1>&2
             exit 1
           fi
-          if ! printf '%s\n' "$check_log" | grep -Fq "$check_opt_in_marker"; then
-            echo "UPGRADE SMOKE FAIL: default migration check omitted the version-scoped opt-in instruction" 1>&2
+          if ! printf '%s\n' "$legacy_check_log" | grep -Fq "$migration_auto_marker"; then
+            echo "UPGRADE SMOKE FAIL: legacy persisted check did not use the auto migration path" 1>&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$legacy_check_log" | grep -Fq 'applied migration'; then
+            echo "UPGRADE SMOKE FAIL: legacy persisted check did not report migration completion" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$legacy_check_log" | grep -Fq '/tmp/openclaw-migration'; then
+            echo "UPGRADE SMOKE FAIL: legacy persisted check exposed a temporary candidate path" 1>&2
+            exit 1
+          fi
+          if ! docker exec "$legacy_check_container" test -e /home/node/.openclaw/.unraid-template-seeded; then
+            echo "UPGRADE SMOKE FAIL: first-boot template seed did not run after legacy check compatibility migration" 1>&2
             exit 1
           fi
           docker run --rm --entrypoint node \
-            -v "$volume:/home/node/.openclaw" \
+            -v "$legacy_check_volume:/home/node/.openclaw" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const configDir = "/home/node/.openclaw";
+            const backups = fs.readdirSync(configDir).filter((name) => /^openclaw\.json\.v2026\.8\.1-backup-.+/.test(name));
+            if (backups.length !== 1) {
+              console.error("UPGRADE SMOKE FAIL: legacy persisted check did not create exactly one real migration backup");
+              process.exit(1);
+            }
+          '
+
+          docker run -d --name "$dry_run_container" \
+            -v "$dry_run_volume:/home/node/.openclaw" \
+            -e PUID=1000 -e PGID=1000 \
+            -e OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 \
+            -e OPENCLAW_GATEWAY_TOKEN=upgrade-smoke-token \
+            -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
+            -e OPENCLAW_CONFIG_MIGRATION=dry-run \
+            -e CUSTOM_LLM_BASE_URL=http://127.0.0.1:9/v1 \
+            -e CUSTOM_LLM_API_KEY=upgrade-smoke \
+            -e CUSTOM_LLM_API_TYPE=openai-completions \
+            -e CUSTOM_LLM_MODEL_ID=upgrade-smoke-model \
+            "$DERIVED_IMAGE:smoke"
+
+          if ! wait_for_exit "$dry_run_container"; then
+            echo "UPGRADE SMOKE FAIL: explicit migration dry-run did not refuse startup" 1>&2
+            docker logs "$dry_run_container" 2>&1 || true
+            exit 1
+          fi
+          dry_run_exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$dry_run_container")
+          dry_run_log=$(docker logs "$dry_run_container" 2>&1 || true)
+          echo "--- persisted-config explicit-dry-run log ---"
+          printf '%s\n' "$dry_run_log"
+          if [ "$dry_run_exit_code" = "0" ]; then
+            echo "UPGRADE SMOKE FAIL: explicit migration dry-run exited successfully" 1>&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$dry_run_log" | grep -Fq "$migration_required_marker"; then
+            echo "UPGRADE SMOKE FAIL: explicit migration dry-run omitted the migration-required log" 1>&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$dry_run_log" | grep -Fq "$dry_run_plan_marker"; then
+            echo "UPGRADE SMOKE FAIL: explicit migration dry-run omitted the path-only plan" 1>&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$dry_run_log" | grep -Fq "$dry_run_refusal_marker"; then
+            echo "UPGRADE SMOKE FAIL: explicit migration dry-run omitted its no-write refusal" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint node \
+            -v "$dry_run_volume:/home/node/.openclaw" \
             -v "$fixture_file:/fixture:ro" \
             "$DERIVED_IMAGE:smoke" -e '
             const fs = require("node:fs");
             const configDir = "/home/node/.openclaw";
             const fail = (message) => { console.error(`UPGRADE SMOKE FAIL: ${message}`); process.exit(1); };
             if (!fs.readFileSync(`${configDir}/openclaw.json`).equals(fs.readFileSync("/fixture"))) {
-              fail("default migration check changed persisted config bytes");
+              fail("explicit migration dry-run changed persisted config bytes");
             }
             const backups = fs.readdirSync(configDir).filter((name) => /^openclaw\.json\.v2026\.8\.1-backup-.+/.test(name));
-            if (backups.length !== 0) fail("default migration check created a backup");
+            if (backups.length !== 0) fail("explicit migration dry-run created a backup");
           '
 
-          docker run -d --name "$apply_container" \
-            -v "$volume:/home/node/.openclaw" \
+          docker run -d --name "$auto_container" \
+            -v "$auto_volume:/home/node/.openclaw" \
             -e PUID=1000 -e PGID=1000 \
+            -e OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 \
             -e OPENCLAW_GATEWAY_TOKEN=upgrade-smoke-token \
             -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
-            -e OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1 \
             -e CUSTOM_LLM_BASE_URL=http://127.0.0.1:9/v1 \
             -e CUSTOM_LLM_API_KEY=upgrade-smoke \
             -e CUSTOM_LLM_API_TYPE=openai-completions \
             -e CUSTOM_LLM_MODEL_ID=upgrade-smoke-model \
             "$DERIVED_IMAGE:smoke"
 
-          if ! wait_for_ready "$apply_container"; then
-            echo "UPGRADE SMOKE FAIL: explicit migration apply never reached readiness" 1>&2
-            docker logs "$apply_container" 2>&1 || true
+          if ! wait_for_ready "$auto_container"; then
+            echo "UPGRADE SMOKE FAIL: default auto migration of the legacy fixture never reached readiness" 1>&2
+            docker logs "$auto_container" 2>&1 || true
             exit 1
           fi
-          apply_log=$(docker logs "$apply_container" 2>&1 || true)
-          echo "--- persisted-config explicit-apply log ---"
-          printf '%s\n' "$apply_log"
-          if ! printf '%s\n' "$apply_log" | grep -Fq "$migration_required_marker"; then
-            echo "UPGRADE SMOKE FAIL: explicit migration apply omitted the migration-required log" 1>&2
+          auto_log=$(docker logs "$auto_container" 2>&1 || true)
+          echo "--- persisted-config default-auto legacy log ---"
+          printf '%s\n' "$auto_log"
+          if ! printf '%s\n' "$auto_log" | grep -Fq "$migration_required_marker"; then
+            echo "UPGRADE SMOKE FAIL: default auto migration omitted the migration-required log" 1>&2
             exit 1
           fi
-          if ! printf '%s\n' "$apply_log" | grep -Fq "$migration_apply_marker"; then
-            echo "UPGRADE SMOKE FAIL: explicit migration apply omitted the apply log" 1>&2
+          if ! printf '%s\n' "$auto_log" | grep -Fq "$candidate_validated_marker"; then
+            echo "UPGRADE SMOKE FAIL: default auto migration did not validate its candidate" 1>&2
             exit 1
           fi
-          if ! printf '%s\n' "$apply_log" | grep -Fq 'applied migration'; then
-            echo "UPGRADE SMOKE FAIL: explicit migration apply did not report completion" 1>&2
+          if ! printf '%s\n' "$auto_log" | grep -Fq "$migration_auto_marker"; then
+            echo "UPGRADE SMOKE FAIL: default auto migration omitted the auto-apply log" 1>&2
             exit 1
           fi
-          if ! docker exec "$apply_container" test -e /home/node/.openclaw/.unraid-template-seeded; then
-            echo "UPGRADE SMOKE FAIL: first-boot template seed did not run after explicit migration apply" 1>&2
+          if ! printf '%s\n' "$auto_log" | grep -Fq 'applied migration'; then
+            echo "UPGRADE SMOKE FAIL: default auto migration did not report completion" 1>&2
+            exit 1
+          fi
+          if ! docker exec "$auto_container" test -e /home/node/.openclaw/.unraid-template-seeded; then
+            echo "UPGRADE SMOKE FAIL: first-boot template seed did not run after default auto migration" 1>&2
             exit 1
           fi
           docker run --rm --entrypoint node \
-            -v "$volume:/home/node/.openclaw" \
+            -v "$auto_volume:/home/node/.openclaw" \
             -v "$fixture_file:/fixture:ro" \
             "$DERIVED_IMAGE:smoke" -e '
             const fs = require("node:fs");
@@ -439,7 +595,7 @@ jobs:
             const expectedAllowlist = ["openai/gpt-4.1"];
 
             const backups = fs.readdirSync(configDir).filter((name) => /^openclaw\.json\.v2026\.8\.1-backup-.+/.test(name));
-            if (backups.length !== 1) fail("explicit migration apply did not create exactly one backup");
+            if (backups.length !== 1) fail("default auto migration did not create exactly one backup");
             const backupPath = `${configDir}/${backups[0]}`;
             if (!fs.statSync(backupPath).isFile() || fs.statSync(backupPath).size === 0) fail("narrow migration backup is empty");
             if (!fs.readFileSync(backupPath).equals(fs.readFileSync("/fixture"))) fail("narrow migration backup is not byte-identical to the fixture");
@@ -485,16 +641,17 @@ jobs:
             if (llm?.allowAuthProfileOverride !== true) fail("llm allowAuthProfileOverride was not enabled");
             if (JSON.stringify(llm?.allowedCompletionModels) !== JSON.stringify(expectedAllowlist)) fail("llm allowedCompletionModels changed during migration");
           '
-          if ! gateway_ready "$apply_container"; then
-            echo "UPGRADE SMOKE FAIL: gateway lost readiness after explicit migration assertions" 1>&2
+          if ! gateway_ready "$auto_container"; then
+            echo "UPGRADE SMOKE FAIL: gateway lost readiness after default auto migration assertions" 1>&2
             exit 1
           fi
 
-          docker stop -t 15 "$apply_container" >/dev/null
-          docker rm "$apply_container" >/dev/null
+          docker stop -t 15 "$auto_container" >/dev/null
+          docker rm "$auto_container" >/dev/null
           docker run -d --name "$restart_container" \
-            -v "$volume:/home/node/.openclaw" \
+            -v "$auto_volume:/home/node/.openclaw" \
             -e PUID=1000 -e PGID=1000 \
+            -e OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 \
             -e OPENCLAW_GATEWAY_TOKEN=upgrade-smoke-token \
             -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
             -e CUSTOM_LLM_BASE_URL=http://127.0.0.1:9/v1 \
@@ -504,19 +661,138 @@ jobs:
             "$DERIVED_IMAGE:smoke"
 
           if ! wait_for_ready "$restart_container"; then
-            echo "UPGRADE SMOKE FAIL: valid restart without migration opt-in never reached readiness" 1>&2
+            echo "UPGRADE SMOKE FAIL: valid default restart never reached readiness" 1>&2
             docker logs "$restart_container" 2>&1 || true
             exit 1
           fi
           restart_log=$(docker logs "$restart_container" 2>&1 || true)
-          echo "--- persisted-config normal-restart log ---"
+          echo "--- persisted-config default restart log ---"
           printf '%s\n' "$restart_log"
           if printf '%s\n' "$restart_log" | grep -Fq "$migration_required_marker"; then
-            echo "UPGRADE SMOKE FAIL: valid restart without opt-in requested migration" 1>&2
+            echo "UPGRADE SMOKE FAIL: valid default restart requested migration" 1>&2
             exit 1
           fi
-          if printf '%s\n' "$restart_log" | grep -Fq "$migration_apply_marker"; then
-            echo "UPGRADE SMOKE FAIL: valid restart without opt-in applied migration" 1>&2
+          if printf '%s\n' "$restart_log" | grep -Fq "$migration_auto_marker"; then
+            echo "UPGRADE SMOKE FAIL: valid default restart applied migration" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint node \
+            -v "$auto_volume:/home/node/.openclaw" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const configDir = "/home/node/.openclaw";
+            const backups = fs.readdirSync(configDir).filter((name) => /^openclaw\.json\.v2026\.8\.1-backup-.+/.test(name));
+            if (backups.length !== 1) {
+              console.error("UPGRADE SMOKE FAIL: valid default restart created a second migration backup");
+              process.exit(1);
+            }
+          '
+
+          docker run -d --name "$partial_container" \
+            -v "$partial_volume:/home/node/.openclaw" \
+            -e PUID=1000 -e PGID=1000 \
+            -e OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 \
+            -e OPENCLAW_GATEWAY_TOKEN=upgrade-smoke-token \
+            -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
+            -e CUSTOM_LLM_BASE_URL=http://127.0.0.1:9/v1 \
+            -e CUSTOM_LLM_API_KEY=upgrade-smoke \
+            -e CUSTOM_LLM_API_TYPE=openai-completions \
+            -e CUSTOM_LLM_MODEL_ID=upgrade-smoke-model \
+            "$DERIVED_IMAGE:smoke"
+
+          if ! wait_for_ready "$partial_container"; then
+            echo "UPGRADE SMOKE FAIL: default auto migration of the partial fixture never reached readiness" 1>&2
+            docker logs "$partial_container" 2>&1 || true
+            exit 1
+          fi
+          partial_log=$(docker logs "$partial_container" 2>&1 || true)
+          echo "--- persisted-config default-auto partial log ---"
+          printf '%s\n' "$partial_log"
+          if ! printf '%s\n' "$partial_log" | grep -Fq "$migration_required_marker"; then
+            echo "UPGRADE SMOKE FAIL: partial auto migration omitted the migration-required log" 1>&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$partial_log" | grep -Fq "$candidate_validated_marker"; then
+            echo "UPGRADE SMOKE FAIL: partial auto migration did not validate its candidate" 1>&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$partial_log" | grep -Fq "$migration_auto_marker"; then
+            echo "UPGRADE SMOKE FAIL: partial auto migration omitted the auto-apply log" 1>&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$partial_log" | grep -Fq 'applied migration'; then
+            echo "UPGRADE SMOKE FAIL: partial auto migration did not report completion" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint node \
+            -v "$partial_volume:/home/node/.openclaw" \
+            -v "$partial_fixture_file:/fixture:ro" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const configDir = "/home/node/.openclaw";
+            const fail = (message) => { console.error(`UPGRADE SMOKE FAIL: ${message}`); process.exit(1); };
+            const backups = fs.readdirSync(configDir).filter((name) => /^openclaw\.json\.v2026\.8\.1-backup-.+/.test(name));
+            if (backups.length !== 1) fail("partial auto migration did not create exactly one backup");
+            if (!fs.readFileSync(`${configDir}/${backups[0]}`).equals(fs.readFileSync("/fixture"))) fail("partial auto migration backup is not byte-identical to the fixture");
+            const config = JSON.parse(fs.readFileSync(`${configDir}/openclaw.json`, "utf8"));
+            if (config.env?.vars?.PERSISTED_CONFIG_PARTIAL_SENTINEL !== "preserve-me") fail("partial migration changed the sentinel");
+            const main = config.agents?.entries?.main;
+            if (main?.memorySearch !== undefined) fail("partial migration left agents.entries.main.memorySearch");
+            if (main?.memory?.search?.provider !== "openai") fail("partial migration did not canonicalize the memory provider");
+          '
+
+          docker run -d --name "$mixed_invalid_container" \
+            -v "$mixed_invalid_volume:/home/node/.openclaw" \
+            -e PUID=1000 -e PGID=1000 \
+            -e OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 \
+            -e OPENCLAW_GATEWAY_TOKEN=upgrade-smoke-token \
+            -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
+            -e CUSTOM_LLM_BASE_URL=http://127.0.0.1:9/v1 \
+            -e CUSTOM_LLM_API_KEY=upgrade-smoke \
+            -e CUSTOM_LLM_API_TYPE=openai-completions \
+            -e CUSTOM_LLM_MODEL_ID=upgrade-smoke-model \
+            "$DERIVED_IMAGE:smoke"
+
+          if ! wait_for_exit "$mixed_invalid_container"; then
+            echo "UPGRADE SMOKE FAIL: mixed invalid+migratable config did not refuse default auto startup" 1>&2
+            docker logs "$mixed_invalid_container" 2>&1 || true
+            exit 1
+          fi
+          mixed_invalid_exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$mixed_invalid_container")
+          mixed_invalid_log=$(docker logs "$mixed_invalid_container" 2>&1 || true)
+          echo "--- persisted-config default-auto mixed-invalid log ---"
+          printf '%s\n' "$mixed_invalid_log"
+          if [ "$mixed_invalid_exit_code" = "0" ]; then
+            echo "UPGRADE SMOKE FAIL: mixed invalid+migratable config default auto startup exited successfully" 1>&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$mixed_invalid_log" | grep -Fq "$migration_required_marker"; then
+            echo "UPGRADE SMOKE FAIL: mixed invalid+migratable config omitted the migration-required log" 1>&2
+            exit 1
+          fi
+          if ! printf '%s\n' "$mixed_invalid_log" | grep -Fq "$candidate_validation_marker"; then
+            echo "UPGRADE SMOKE FAIL: mixed invalid+migratable config omitted the candidate-validation refusal" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$mixed_invalid_log" | grep -Fq '/tmp/openclaw-migration'; then
+            echo "UPGRADE SMOKE FAIL: mixed invalid+migratable config exposed a temporary candidate path" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint node \
+            -v "$mixed_invalid_volume:/home/node/.openclaw" \
+            -v "$mixed_invalid_fixture_file:/fixture:ro" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const configDir = "/home/node/.openclaw";
+            const fail = (message) => { console.error(`UPGRADE SMOKE FAIL: ${message}`); process.exit(1); };
+            if (!fs.readFileSync(`${configDir}/openclaw.json`).equals(fs.readFileSync("/fixture"))) {
+              fail("mixed invalid+migratable default auto migration changed persisted config bytes");
+            }
+            const backups = fs.readdirSync(configDir).filter((name) => /^openclaw\.json\.v2026\.8\.1-backup-.+/.test(name));
+            if (backups.length !== 0) fail("mixed invalid+migratable default auto migration created a real backup");
+          '
+          if docker export "$mixed_invalid_container" | tar -tf - | grep -Fq 'tmp/openclaw-migration'; then
+            echo "UPGRADE SMOKE FAIL: mixed invalid+migratable config left temporary candidate artifacts behind" 1>&2
             exit 1
           fi
           echo "PERSISTED-CONFIG UPGRADE SMOKE OK"
