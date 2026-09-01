@@ -624,7 +624,12 @@ def _fsync_parent_directory(directory: Path) -> None:
     directory_flag = getattr(os, "O_DIRECTORY", None)
     if directory_flag is None:
         return
-    descriptor = os.open(str(directory), os.O_RDONLY | directory_flag)
+    try:
+        descriptor = os.open(str(directory), os.O_RDONLY | directory_flag)
+    except OSError as error:
+        if error.errno in (errno.EINVAL, errno.ENOTSUP, errno.ENOSYS):
+            return
+        raise
     try:
         try:
             os.fsync(descriptor)
