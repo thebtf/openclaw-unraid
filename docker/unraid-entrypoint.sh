@@ -240,7 +240,7 @@ ORIGINS_JSON=$(csv_to_json_strings "$OPENCLAW_ALLOWED_ORIGINS")
 
 # --- Ensure config file exists; openclaw config set requires it ---
 CONFIG_EXISTED=0
-if [ -e "$CFG" ] || [ -L "$CFG" ]; then
+if [ -L "$CFG" ] || [ -s "$CFG" ]; then
   CONFIG_EXISTED=1
 else
   printf '%s' '{}' > "$CFG"
