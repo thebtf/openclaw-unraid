@@ -277,7 +277,7 @@ docker exec -e OPENCLAW_LOG_LEVEL=debug -e OPENCLAW_GATEWAY_STARTUP_TRACE=1 Open
 Diagnostic CLI inside the container:
 ```bash
 docker exec OpenClaw sh -c 'cd /app && node dist/index.js doctor'           # health check
-docker exec OpenClaw sh -c 'cd /app && node dist/index.js doctor --fix'     # auto-repair
+docker exec OpenClaw sh -c 'cd /app && node dist/index.js doctor --fix'     # manual troubleshooting only; never an automatic upgrade recovery
 docker exec OpenClaw sh -c 'cd /app && node dist/index.js config validate'  # schema check
 docker exec OpenClaw sh -c 'cd /app && node dist/index.js gateway stability --bundle latest --json'  # last crash snapshot
 ```
@@ -381,6 +381,16 @@ Functions that consume this:
 ## Updating
 
 > **OpenClaw 2.0 migration warning:** OpenClaw migrates sessions and transcripts to SQLite. Make a verified backup of OpenClaw Data before you upgrade. Before you downgrade, use the current OpenClaw CLI to restore archived legacy transcript artifacts. See [OpenClaw's Updating guide](https://docs.openclaw.ai/install/updating).
+
+### Existing persisted configuration
+
+Before upgrading, make and verify a backup of OpenClaw Data. On the first upgraded start, if the existing configuration fails validation, the image applies a narrow backup-first migration before template-managed writes and first-boot seeding. It creates a timestamped `openclaw.json.v2026.8.1-backup-*` backup, validates the migrated configuration, then continues the managed-write and seeding path in the same start. If the migration or validation fails, the entrypoint fails closed.
+
+Signed browser device pairing remains expected in OpenClaw 2.0. Approve a pending browser request as described in [Browser device pairing is pending](#browser-device-pairing-is-pending).
+
+For targeted troubleshooting, inspect the container logs for `[bootstrap] existing config needs OpenClaw migration; applying narrow backup-first migration`. Do not use full `openclaw doctor --fix` as routine upgrade recovery. It is a manual troubleshooting tool after you have preserved the backup; the entrypoint never runs it automatically.
+
+If the container is stopped and cannot reach the image migrator, use the manual fallback from this repository. Find the **OpenClaw Data** host path in the Unraid template. Do not paste configuration values into a command. Run `python3 scripts/migrate-openclaw-2-config.py --config <OpenClaw-Data-host-path>/openclaw.json` first; it defaults to a dry run. After you review its output, add `--apply` to migrate. The script creates an adjacent timestamped, byte-for-byte backup and prints only the affected paths.
 
 **Via Unraid Docker UI:**
 1. Docker tab → Click OpenClaw icon → Check for Updates → Apply

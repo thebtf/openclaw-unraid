@@ -326,6 +326,16 @@ docker pull ghcr.io/thebtf/openclaw-unraid:latest
 docker restart OpenClaw
 ```
 > **OpenClaw 2.0 重要提示：** 会话和转录记录已迁移到 SQLite。升级前，请创建并验证 OpenClaw Data 的备份。降级前，请使用当前 OpenClaw CLI 恢复已归档的旧版转录记录工件。请参阅 [OpenClaw 更新和降级指南](https://docs.openclaw.ai/install/updating)。
+
+### 已持久化的现有配置
+
+升级前，请创建并验证 OpenClaw Data 的备份。升级后的首次启动中，如果现有配置未通过验证，镜像会在模板管理的写入和首次启动初始化之前执行窄范围的备份优先迁移。它会创建带时间戳的 `openclaw.json.v2026.8.1-backup-*` 备份，验证迁移后的配置，然后在同一次启动中继续执行受管理的写入和初始化。如果迁移或验证失败，入口脚本会安全地失败关闭。
+
+OpenClaw 2.0 仍要求已签名的浏览器设备配对。请按照[浏览器设备配对等待批准](#浏览器设备配对等待批准)一节批准等待中的浏览器请求。
+
+如需针对性排查，请在容器日志中查找 `[bootstrap] existing config needs OpenClaw migration; applying narrow backup-first migration`。不要将完整的 `openclaw doctor --fix` 用作常规升级恢复。它是在保留备份后使用的手动排查工具；入口脚本绝不会自动运行它。
+
+如果容器已停止且无法运行镜像迁移器，请使用此仓库中的手动备用方法。在 Unraid 模板中找到 **OpenClaw Data** 的主机路径。不要将配置值粘贴到命令中。先运行 `python3 scripts/migrate-openclaw-2-config.py --config <OpenClaw-Data-主机路径>/openclaw.json`；该命令默认执行演练。确认输出后，添加 `--apply` 以执行迁移。该脚本会在相邻位置创建带时间戳、与原始文件逐字节相同的备份，并且只打印受影响的路径。
 更新会保留已填写的值和自定义环境变量，但会丢弃明确已弃用的模板变量。`OPENCLAW_DISABLE_DEVICE_AUTH` 不再生效。
 
 
