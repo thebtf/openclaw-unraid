@@ -390,7 +390,7 @@ Signed browser device pairing remains expected in OpenClaw 2.0. Approve a pendin
 
 For targeted troubleshooting, inspect the container logs for `[bootstrap] existing config needs OpenClaw migration; applying narrow backup-first migration`. Do not use full `openclaw doctor --fix` as routine upgrade recovery. It is a manual troubleshooting tool after you have preserved the backup; the entrypoint never runs it automatically.
 
-If the container is stopped and cannot reach the image migrator, use the manual fallback from this repository. Find the **OpenClaw Data** host path in the Unraid template. Do not paste configuration values into a command. Run `python3 scripts/migrate-openclaw-2-config.py <OpenClaw-Data-host-path>/openclaw.json` first; it defaults to a dry run. After you review its output, add `--apply` to migrate. The script creates an adjacent timestamped, byte-for-byte backup and prints only the affected paths.
+If the container is stopped and cannot reach the image migrator, use the manual fallback from this repository. Find the **OpenClaw Data** host path in the Unraid template. Do not paste configuration values into a command. Run `python3 scripts/migrate-openclaw-2-config.py --config <OpenClaw-Data-host-path>/openclaw.json` first; it defaults to a dry run. After you review its output, add `--apply` to migrate. The script creates an adjacent timestamped, byte-for-byte backup and prints only the affected paths.
 
 **Via Unraid Docker UI:**
 1. Docker tab → Click OpenClaw icon → Check for Updates → Apply

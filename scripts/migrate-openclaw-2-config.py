@@ -122,6 +122,8 @@ def _validate_configuration(root: Any) -> Optional[List[str]]:
             for name, entry in named_entries.items():
                 entry_path = "agents.entries." + name
                 entry_object = _expect_object(entry, entry_path)
+                if "memorySearch" in entry_object:
+                    _validate_memory_search(entry_object["memorySearch"], entry_path + ".memorySearch")
                 if "memory" in entry_object:
                     memory = _expect_object(entry_object["memory"], entry_path + ".memory")
                     if "search" in memory:
@@ -231,6 +233,28 @@ def _migrate_canonical_agent_memory_search(
     if isinstance(memory, dict) and "search" in memory:
         _migrate_memory_search_settings(memory["search"], path + ".memory.search", changes)
 
+def _migrate_agent_memory_search(
+    entry: Dict[str, Any], path: str, changes: ChangeLog
+) -> None:
+    if "memorySearch" in entry:
+        legacy = entry["memorySearch"]
+        if "memory" not in entry:
+            entry["memory"] = {}
+        memory = entry["memory"]
+        canonical = memory.get("search", MISSING)
+        canonical_values: Dict[str, Any] = {} if canonical is MISSING else canonical
+
+        merged = dict(legacy)
+        merged.update(canonical_values)
+        if canonical is MISSING or merged != canonical_values:
+            memory["search"] = merged
+            changes.add(path + ".memory.search")
+
+        del entry["memorySearch"]
+        changes.add(path + ".memorySearch")
+    _migrate_canonical_agent_memory_search(entry, path, changes)
+
+
 
 def _migrate_agent_memory_searches(root: Dict[str, Any], changes: ChangeLog) -> None:
     agents = root.get("agents")
@@ -240,29 +264,12 @@ def _migrate_agent_memory_searches(root: Dict[str, Any], changes: ChangeLog) -> 
     entries = agents.get("list")
     if isinstance(entries, list):
         for index, entry in enumerate(entries):
-            path = "agents.list[{}]".format(index)
-            if "memorySearch" in entry:
-                legacy = entry["memorySearch"]
-                if "memory" not in entry:
-                    entry["memory"] = {}
-                memory = entry["memory"]
-                canonical = memory.get("search", MISSING)
-                canonical_values: Dict[str, Any] = {} if canonical is MISSING else canonical
-
-                merged = dict(legacy)
-                merged.update(canonical_values)
-                if canonical is MISSING or merged != canonical_values:
-                    memory["search"] = merged
-                    changes.add(path + ".memory.search")
-
-                del entry["memorySearch"]
-                changes.add(path + ".memorySearch")
-            _migrate_canonical_agent_memory_search(entry, path, changes)
+            _migrate_agent_memory_search(entry, "agents.list[{}]".format(index), changes)
 
     named_entries = agents.get("entries")
     if isinstance(named_entries, dict):
         for name, entry in named_entries.items():
-            _migrate_canonical_agent_memory_search(entry, "agents.entries." + name, changes)
+            _migrate_agent_memory_search(entry, "agents.entries." + name, changes)
 
 
 def _migrate_agent_defaults(root: Dict[str, Any], changes: ChangeLog) -> None:
@@ -322,20 +329,12 @@ def _migrate_llm_task(
         return
 
     llm_task = entries["llm-task"]
-    if "llm" not in llm_task:
-        llm_task["llm"] = {}
-    llm = llm_task["llm"]
-
-    if "allowModelOverride" not in llm:
-        llm["allowModelOverride"] = True
-        changes.add("plugins.entries.llm-task.llm.allowModelOverride")
-    if "allowAuthProfileOverride" not in llm:
-        llm["allowAuthProfileOverride"] = True
-        changes.add("plugins.entries.llm-task.llm.allowAuthProfileOverride")
-
     if normalized_models is None:
         return
 
+    if "llm" not in llm_task:
+        llm_task["llm"] = {}
+    llm = llm_task["llm"]
     config = llm_task["config"]
     if "allowedCompletionModels" not in llm:
         llm["allowedCompletionModels"] = normalized_models
@@ -424,6 +423,12 @@ def _assert_legacy_paths_absent(root: Dict[str, Any]) -> None:
         named_entries = agents.get("entries")
         if isinstance(named_entries, dict):
             for name, entry in named_entries.items():
+                if isinstance(entry, dict) and "memorySearch" in entry:
+                    raise MigrationError(
+                        "migration invariant failed: legacy path remains: agents.entries."
+                        + name
+                        + ".memorySearch"
+                    )
                 if isinstance(entry, dict):
                     _assert_canonical_agent_memory_search(entry, "agents.entries." + name)
 

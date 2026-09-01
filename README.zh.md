@@ -335,7 +335,7 @@ OpenClaw 2.0 仍要求已签名的浏览器设备配对。请按照[浏览器设
 
 如需针对性排查，请在容器日志中查找 `[bootstrap] existing config needs OpenClaw migration; applying narrow backup-first migration`。不要将完整的 `openclaw doctor --fix` 用作常规升级恢复。它是在保留备份后使用的手动排查工具；入口脚本绝不会自动运行它。
 
-如果容器已停止且无法运行镜像迁移器，请使用此仓库中的手动备用方法。在 Unraid 模板中找到 **OpenClaw Data** 的主机路径。不要将配置值粘贴到命令中。先运行 `python3 scripts/migrate-openclaw-2-config.py <OpenClaw-Data-主机路径>/openclaw.json`；该命令默认执行演练。确认输出后，添加 `--apply` 以执行迁移。该脚本会在相邻位置创建带时间戳、与原始文件逐字节相同的备份，并且只打印受影响的路径。
+如果容器已停止且无法运行镜像迁移器，请使用此仓库中的手动备用方法。在 Unraid 模板中找到 **OpenClaw Data** 的主机路径。不要将配置值粘贴到命令中。先运行 `python3 scripts/migrate-openclaw-2-config.py --config <OpenClaw-Data-主机路径>/openclaw.json`；该命令默认执行演练。确认输出后，添加 `--apply` 以执行迁移。该脚本会在相邻位置创建带时间戳、与原始文件逐字节相同的备份，并且只打印受影响的路径。
 更新会保留已填写的值和自定义环境变量，但会丢弃明确已弃用的模板变量。`OPENCLAW_DISABLE_DEVICE_AUTH` 不再生效。
 
 

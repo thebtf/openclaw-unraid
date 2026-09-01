@@ -21,6 +21,7 @@ on:
     paths:
       - Dockerfile
       - docker/**
+      - scripts/migrate-openclaw-2-config.py
       - .github/workflows/build-image.yml
   schedule:
     - cron: "23 5 * * *" # daily, off the :00 herd
