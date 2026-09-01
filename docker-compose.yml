@@ -42,9 +42,10 @@ services:
       # REQUIRED since OpenClaw 2026.2: comma-separated browser origins for the Control UI.
       # Example: http://192.168.1.41:18789  or  http://192.168.1.41:18789,http://openclaw.local:18789
       - OPENCLAW_ALLOWED_ORIGINS=${OPENCLAW_ALLOWED_ORIGINS:?Allowed origins required (e.g. http://YOUR-IP:18789)}
-      # Config migration mode. `auto` migrates only the supported 2026.8.1
-      # legacy or partial config shapes. Ambiguous or unsupported configs are
-      # left byte-identical with no backup; use `check` or `apply-v2026.8.1` only for recovery.
+      # Config migration mode. Leave `auto` at its default for a normal update;
+      # it validates a private migrated candidate before the real backup/apply.
+      # Persisted `check` warns and acts as `auto`; use `dry-run` only for a no-write,
+      # no-backup inspection, or `apply-v2026.8.1` for an explicit advanced apply.
       - OPENCLAW_CONFIG_MIGRATION=${OPENCLAW_CONFIG_MIGRATION:-auto}
       # Custom LLM endpoint (optional; FIRST-BOOT seed only — after that
       # openclaw.json owns the config, see CHANGELOG v2.0.0)
