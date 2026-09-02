@@ -431,6 +431,9 @@ if [ "$CONFIG_EXISTED" = "1" ]; then
 
     apply_supported_migration
     CONFIG_RECOVERY_ATTEMPTED=1
+  elif [ "$CONFIG_MIGRATION_MODE" = "dry-run" ]; then
+    echo "[bootstrap] FATAL: existing OpenClaw config needs no migration; workspace migration was not run because OPENCLAW_CONFIG_MIGRATION=dry-run is inspection-only. Refusing managed writes." 1>&2
+    exit 1
   elif [ "$CONFIG_MIGRATION_MODE" = "apply-v2026.8.1" ]; then
     echo "[bootstrap] WARNING: OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1 is no longer needed for this valid existing config. Return it to auto before the next image update." 1>&2
   fi

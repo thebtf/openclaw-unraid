@@ -681,6 +681,7 @@ async function main() {
   plans.push(await inspectActiveSource(source));
  }
 
+ const preparedBackups = [];
  const createdBackups = [];
  try {
   for (const plan of plans) {
@@ -688,6 +689,7 @@ async function main() {
   }
   for (const plan of plans) {
    const backup = await ensureVerifiedBackup(plan);
+   preparedBackups.push({ plan, backup });
    if (backup.created) {
     createdBackups.push(backup);
    }
@@ -698,6 +700,15 @@ async function main() {
     SOURCE_MAX_BYTES[plan.source.kind],
    );
    if (!snapshotsMatch(plan.snapshot, current)) {
+    refuse();
+   }
+  }
+  for (const { plan, backup } of preparedBackups) {
+   const currentBackup = await openStableRegularFile(
+    backup.backupPath,
+    SOURCE_MAX_BYTES[plan.source.kind],
+   );
+   if (!buffersEqual(currentBackup.bytes, plan.snapshot.bytes)) {
     refuse();
    }
   }

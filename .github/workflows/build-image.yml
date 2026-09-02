@@ -814,19 +814,22 @@ jobs:
           workspace_container=smoke-workspace-upgrade
           workspace_restart_container=smoke-workspace-upgrade-restart
           refusal_container=smoke-workspace-upgrade-refused
+          dry_run_container=smoke-workspace-upgrade-dry-run
           workspace_volume=smoke-workspace-upgrade-config
           refusal_volume=smoke-workspace-upgrade-refusal-config
+          dry_run_volume=smoke-workspace-upgrade-dry-run-config
           workspace_fixture_dir=""
           workspace_config_secret='workspace-config-secret-7f4d89'
           workspace_source_secret='workspace-source-secret-1c38ab'
           backup_suffix='.openclaw-2026.8.1-pre-migration.bak'
+          dry_run_refusal_marker='[bootstrap] FATAL: existing OpenClaw config needs no migration; workspace migration was not run because OPENCLAW_CONFIG_MIGRATION=dry-run is inspection-only. Refusing managed writes.'
 
           cleanup() {
-            docker rm -f "$workspace_container" "$workspace_restart_container" "$refusal_container" >/dev/null 2>&1 || true
+            docker rm -f "$workspace_container" "$workspace_restart_container" "$refusal_container" "$dry_run_container" >/dev/null 2>&1 || true
             if [ -n "$workspace_fixture_dir" ]; then
               rm -rf "$workspace_fixture_dir"
             fi
-            docker volume rm -f "$workspace_volume" "$refusal_volume" >/dev/null 2>&1 || true
+            docker volume rm -f "$workspace_volume" "$refusal_volume" "$dry_run_volume" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
 
@@ -864,6 +867,23 @@ jobs:
               -v "$volume:/home/node/.openclaw" \
               -e PUID=1000 -e PGID=1000 \
               -e OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 \
+              -e OPENCLAW_GATEWAY_TOKEN=workspace-upgrade-smoke-token \
+              -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
+              -e CUSTOM_LLM_BASE_URL=http://127.0.0.1:9/v1 \
+              -e CUSTOM_LLM_API_KEY=workspace-upgrade-smoke \
+              -e CUSTOM_LLM_API_TYPE=openai-completions \
+              -e CUSTOM_LLM_MODEL_ID=workspace-upgrade-smoke-model \
+              "$DERIVED_IMAGE:smoke"
+          }
+
+          start_workspace_dry_run() {
+            container=$1
+            volume=$2
+            docker run -d --name "$container" \
+              -v "$volume:/home/node/.openclaw" \
+              -e PUID=1000 -e PGID=1000 \
+              -e OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 \
+              -e OPENCLAW_CONFIG_MIGRATION=dry-run \
               -e OPENCLAW_GATEWAY_TOKEN=workspace-upgrade-smoke-token \
               -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
               -e CUSTOM_LLM_BASE_URL=http://127.0.0.1:9/v1 \
@@ -928,6 +948,7 @@ jobs:
 
           docker volume create "$workspace_volume" >/dev/null
           docker volume create "$refusal_volume" >/dev/null
+          docker volume create "$dry_run_volume" >/dev/null
           docker run --rm --entrypoint /bin/sh \
             -v "$workspace_volume:/home/node/.openclaw" \
             -v "$workspace_fixture_dir:/fixtures:ro" \
@@ -941,6 +962,84 @@ jobs:
                 cp "/fixtures/$agent.json" "$workspace/openclaw-workspace-state.json"
               done
             '
+
+          # Config migration dry-run must stop before the workspace helper,
+          # even when the persisted config is valid and a real workspace source
+          # would otherwise be eligible for automatic import.
+          docker run --rm --entrypoint /bin/sh \
+            -v "$dry_run_volume:/home/node/.openclaw" \
+            -v "$workspace_fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" \
+            -ceu '
+              mkdir -p /home/node/.openclaw/workspace-borges
+              cp /fixtures/openclaw.json /home/node/.openclaw/openclaw.json
+              cp /fixtures/borges.json /home/node/.openclaw/workspace-borges/openclaw-workspace-state.json
+            '
+          start_workspace_dry_run "$dry_run_container" "$dry_run_volume"
+          if ! wait_for_exit "$dry_run_container"; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: valid-config dry-run did not stop before gateway startup; logs withheld to protect persisted values" 1>&2
+            exit 1
+          fi
+          dry_run_exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$dry_run_container")
+          dry_run_log=$(docker logs "$dry_run_container" 2>&1 || true)
+          if [ "$dry_run_exit_code" = "0" ]; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: valid-config dry-run exited successfully" 1>&2
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$dry_run_log" | grep -Fxc "$dry_run_refusal_marker" || true)" != "1" ]; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: valid-config dry-run omitted its bounded inspection-only refusal" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$dry_run_log" | grep -Fq 'workspace-migration:'; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: valid-config dry-run invoked the workspace helper" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$dry_run_log" | grep -Fq "$workspace_config_secret" || printf '%s\n' "$dry_run_log" | grep -Fq "$workspace_source_secret"; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: valid-config dry-run disclosed a persisted value" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint node \
+            -v "$dry_run_volume:/home/node/.openclaw:ro" \
+            -v "$workspace_fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const fail = (message) => { console.error(`WORKSPACE UPGRADE SMOKE FAIL: ${message}`); process.exit(1); };
+            const configDir = "/home/node/.openclaw";
+            const source = path.join(configDir, "workspace-borges", "openclaw-workspace-state.json");
+            const backup = `${source}.openclaw-2026.8.1-pre-migration.bak`;
+            if (!fs.readFileSync(path.join(configDir, "openclaw.json")).equals(fs.readFileSync("/fixtures/openclaw.json"))) {
+              fail("valid-config dry-run changed persisted config bytes");
+            }
+            const sourceStat = fs.lstatSync(source);
+            if (!sourceStat.isFile() || sourceStat.nlink !== 1) fail("valid-config dry-run changed legacy source identity");
+            if (!fs.readFileSync(source).equals(fs.readFileSync("/fixtures/borges.json"))) {
+              fail("valid-config dry-run changed legacy source bytes");
+            }
+            if (fs.existsSync(backup) || fs.existsSync(`${source}.doctor-importing`)) {
+              fail("valid-config dry-run created a workspace backup or source claim");
+            }
+            const dbPath = path.join(configDir, "state", "openclaw.sqlite");
+            if (fs.existsSync(dbPath)) {
+              const { DatabaseSync } = require("node:sqlite");
+              const db = new DatabaseSync(dbPath, { readOnly: true });
+              try {
+                const tables = new Set(db.prepare(
+                  "SELECT name FROM sqlite_master WHERE type = ? AND name IN (?, ?)"
+                ).all("table", "workspace_setup_state", "migration_sources").map((row) => row.name));
+                if (tables.has("workspace_setup_state") && Number(db.prepare("SELECT COUNT(*) AS count FROM workspace_setup_state").get().count) !== 0) {
+                  fail("valid-config dry-run created workspace setup SQLite state");
+                }
+                if (tables.has("migration_sources") && Number(db.prepare(
+                  "SELECT COUNT(*) AS count FROM migration_sources WHERE migration_kind = ?"
+                ).get("legacy-workspace-setup-files").count) !== 0) {
+                  fail("valid-config dry-run created a workspace import receipt");
+                }
+              } finally {
+                db.close();
+              }
+            }
+          '
 
           start_workspace_gateway "$workspace_container" "$workspace_volume"
           if ! wait_for_ready "$workspace_container"; then
