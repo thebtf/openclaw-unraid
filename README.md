@@ -545,7 +545,7 @@ The bootstrap prints `[bootstrap]` lines for every action. Common fatals:
 - `FATAL: OPENCLAW_CONFIG_MIGRATION='...' is invalid` — use `auto` (the default), `dry-run`, or `apply-v2026.8.1`; persisted `check` is accepted only as a deprecated `auto` compatibility alias.
 - `existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape` — the config was left byte-identical and no migration backup was created. Preserve `openclaw.json` and recover it manually. Do not run broad `doctor --fix` as an automatic upgrade step.
 - `candidate migration failed native OpenClaw validation` — the real config was left byte-identical and no migration backup was created; preserve `openclaw.json` and recover it manually.
-- `workspace-migration: refused` — upstream found a warning, malformed/unsafe state, or ambiguous source. Legacy workspace sources are left for manual recovery and managed writes are refused; resolve the logged source identity. A malformed or unsafe preflight source is unchanged and creates no workspace backup, SQLite import, or source removal. A later refusal may retain already verified backups. Do not run broad `doctor --fix`.
+- `workspace-migration: refused` — the workspace helper failed closed before gateway start: an unsafe or ambiguous source, runtime record/hash/path check, lock, backup/import step, or final verification failed. Inspect the preceding bounded `FATAL:` line; preserve all legacy sources and any existing verified backups. Managed writes remain refused. Do not run broad `doctor --fix` automatically.
 
 To force a fully fresh config (loses any UI edits):
 ```bash

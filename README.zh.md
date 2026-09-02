@@ -439,7 +439,7 @@ docker logs OpenClaw 2>&1 | tail -50
 - `FATAL: OPENCLAW_CONFIG_MIGRATION='...' is invalid` —— 使用 `auto`（默认值）、`dry-run` 或 `apply-v2026.8.1`；持久化的 `check` 仅作为已弃用的 `auto` 兼容别名被接受。
 - `existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape` —— 配置保持逐字节不变，未创建迁移备份。保留 `openclaw.json` 并手动恢复。不要将宽泛的 `doctor --fix` 作为自动更新步骤运行。
 - `candidate migration failed native OpenClaw validation` —— 真实配置保持逐字节不变，未创建迁移备份；请保留 `openclaw.json` 并手动恢复。
-- `workspace-migration: refused` —— 上游发现警告、格式错误/不安全状态或来源不明确。legacy 工作区源会保留以供手动恢复，且托管写入被拒绝；请解决日志中报告的源身份问题。预检时被拒绝的格式错误或不安全源保持不变，不会创建工作区备份、SQLite 导入或源删除。较晚的拒绝可能保留已验证备份。不要运行宽泛的 `doctor --fix`。
+- `workspace-migration: refused` —— 工作区 helper 在网关启动前已故障关闭：不安全或不明确的源、runtime record/hash/path 检查、锁、备份/导入步骤或最终验证失败。请检查前面的受限 `FATAL:` 行；保留所有 legacy 源及任何现有的已验证备份。托管写入仍被拒绝。不要自动运行宽泛的 `doctor --fix`。
 
 强制重置为全新配置（会丢失 UI 中的所有编辑）：
 ```bash
