@@ -269,7 +269,7 @@ async function main() {
     process.stdout.write("session-migration: no-op\n");
     return;
   }
-  if (preflightReport.totals.targets === 0 || preflightReport.totals.legacyEntries === 0) {
+  if (preflightReport.totals.targets === 0) {
     emitFailure("preflight-zero-denominator", "0");
     return;
   }

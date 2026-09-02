@@ -1429,7 +1429,7 @@ jobs:
           }
           session_fixture_dir=$(mktemp -d)
           cat > "$session_fixture_dir/openclaw.json" <<JSON
-          {"gateway":{"mode":"local","bind":"lan","controlUi":{"allowedOrigins":["http://127.0.0.1:18789"]},"auth":{"mode":"token"}},"agents":{"entries":{"main":{"default":true},"borges":{}}},"env":{"vars":{"SESSION_STORE_SMOKE_SECRET":"$session_config_secret"}}}
+          {"gateway":{"mode":"local","bind":"lan","controlUi":{"allowedOrigins":["http://127.0.0.1:18789"]},"auth":{"mode":"token"}},"agents":{"entries":{"main":{"default":true},"borges":{},"glados":{}}},"env":{"vars":{"SESSION_STORE_SMOKE_SECRET":"$session_config_secret"}}}
           JSON
           make_legacy_source() {
             agent=$1; session_id=$2
@@ -1444,6 +1444,7 @@ jobs:
           make_legacy_source main main-sentinel-session
           make_legacy_source borges borges-import-session
           printf '%s\n' '{"agent:borges:main":' > "$session_fixture_dir/malformed-sessions.json"
+          printf '%s\n' '{}' > "$session_fixture_dir/glados-sessions.json"
 
           docker volume create "$session_volume" >/dev/null
           docker volume create "$session_refusal_volume" >/dev/null
@@ -1468,10 +1469,11 @@ jobs:
             -v "$session_volume:/home/node/.openclaw" \
             -v "$session_fixture_dir:/fixtures:ro" \
             "$DERIVED_IMAGE:smoke" -ceu '
-              mkdir -p /home/node/.openclaw/agents/borges/sessions
+              mkdir -p /home/node/.openclaw/agents/borges/sessions /home/node/.openclaw/agents/glados/sessions
               cp /fixtures/borges-sessions.json /home/node/.openclaw/agents/borges/sessions/sessions.json
               cp /fixtures/borges-session.jsonl /home/node/.openclaw/agents/borges/sessions/borges-session.jsonl
-              chown -R 1000:1000 /home/node/.openclaw/agents/borges
+              cp /fixtures/glados-sessions.json /home/node/.openclaw/agents/glados/sessions/sessions.json
+              chown -R 1000:1000 /home/node/.openclaw/agents/borges /home/node/.openclaw/agents/glados
             '
 
           start_session_gateway "$session_container" "$session_volume"
@@ -1480,8 +1482,8 @@ jobs:
             exit 1
           fi
           session_log=$(docker logs "$session_container" 2>&1 || true)
-          if [ "$(printf '%s\n' "$session_log" | grep -Fxc '[bootstrap] session-migration: applied targets=1 entries=1 events=2' || true)" != "1" ]; then
-            echo "SESSION STORE UPGRADE SMOKE FAIL: helper did not emit the exact one-target applied count" 1>&2
+          if [ "$(printf '%s\n' "$session_log" | grep -Fxc '[bootstrap] session-migration: applied targets=2 entries=1 events=2' || true)" != "1" ]; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: helper did not emit the exact applied count" 1>&2
             exit 1
           fi
           if printf '%s\n' "$session_log" | grep -Fq "$session_config_secret" || printf '%s\n' "$session_log" | grep -Fq '"targets"'; then
@@ -1507,6 +1509,7 @@ jobs:
             const mainDb = path.join(configDir, "agents", "main", "agent", "openclaw-agent.sqlite");
             const borgesDb = path.join(configDir, "agents", "borges", "agent", "openclaw-agent.sqlite");
             const borgesStore = path.join(configDir, "agents", "borges", "sessions", "sessions.json");
+            const gladosStore = path.join(configDir, "agents", "glados", "sessions", "sessions.json");
             const borgesTranscript = path.join(configDir, "agents", "borges", "sessions", "borges-session.jsonl");
             const manifestPaths = (directory) => !fs.existsSync(directory) ? [] : fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
               const child = path.join(directory, entry.name);
@@ -1516,8 +1519,9 @@ jobs:
             if (manifests.length !== 2) fail("expected one public seed and one helper migration manifest");
             const borgesManifest = manifests.find(({ manifest }) => Array.isArray(manifest.targets) && manifest.targets.some((target) => Array.isArray(target?.plannedMoves) && target.plannedMoves.some((move) => move?.sourcePath === borgesStore)));
             const storeMove = borgesManifest?.manifest.targets.flatMap((target) => Array.isArray(target?.plannedMoves) ? target.plannedMoves : []).find((move) => move?.sourcePath === borgesStore);
-            if (!storeMove || typeof storeMove.archivePath !== "string" || !fs.lstatSync(storeMove.archivePath).isFile()) fail("helper migration did not publish an upstream archive for the legacy store");
-            if (fs.existsSync(borgesStore) || fs.existsSync(borgesTranscript)) fail("helper migration left the legacy source behind");
+            const gladosStoreMove = borgesManifest?.manifest.targets.flatMap((target) => Array.isArray(target?.plannedMoves) ? target.plannedMoves : []).find((move) => move?.sourcePath === gladosStore);
+            if (!storeMove || !gladosStoreMove || typeof storeMove.archivePath !== "string" || !fs.lstatSync(storeMove.archivePath).isFile() || typeof gladosStoreMove.archivePath !== "string" || !fs.lstatSync(gladosStoreMove.archivePath).isFile()) fail("helper migration did not publish an upstream archive for every legacy store");
+            if (fs.existsSync(borgesStore) || fs.existsSync(borgesTranscript) || fs.existsSync(gladosStore)) fail("helper migration left a legacy source behind");
             const postflight = JSON.parse(fs.readFileSync("/fixtures/postflight.json", "utf8"));
             if (postflight.mode !== "dry-run" || postflight.totals?.targets !== 0 || postflight.totals?.issues !== 0 || postflight.totals?.legacyEntries !== 0) fail("postflight did not report zero legacy targets");
             const assertEntry = (databasePath, sessionKey, sessionId) => {
@@ -1531,7 +1535,7 @@ jobs:
             };
             assertEntry(mainDb, "agent:main:main", "main-sentinel-session");
             assertEntry(borgesDb, "agent:borges:main", "borges-import-session");
-            for (const artifact of [mainDb, borgesDb, borgesManifest.manifestPath, storeMove.archivePath]) {
+            for (const artifact of [mainDb, borgesDb, borgesManifest.manifestPath, storeMove.archivePath, gladosStoreMove.archivePath]) {
               const stat = fs.lstatSync(artifact);
               if (stat.uid !== 1000 || stat.gid !== 1000) fail("session migration artifact is not PUID-owned");
             }
