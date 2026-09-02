@@ -815,21 +815,24 @@ jobs:
           workspace_restart_container=smoke-workspace-upgrade-restart
           refusal_container=smoke-workspace-upgrade-refused
           dry_run_container=smoke-workspace-upgrade-dry-run
+          absent_config_dry_run_container=smoke-workspace-upgrade-absent-config-dry-run
           workspace_volume=smoke-workspace-upgrade-config
           refusal_volume=smoke-workspace-upgrade-refusal-config
           dry_run_volume=smoke-workspace-upgrade-dry-run-config
+          absent_config_dry_run_volume=smoke-workspace-upgrade-absent-config-dry-run-config
           workspace_fixture_dir=""
           workspace_config_secret='workspace-config-secret-7f4d89'
           workspace_source_secret='workspace-source-secret-1c38ab'
           backup_suffix='.openclaw-2026.8.1-pre-migration.bak'
           dry_run_refusal_marker='[bootstrap] FATAL: existing OpenClaw config needs no migration; workspace migration was not run because OPENCLAW_CONFIG_MIGRATION=dry-run is inspection-only. Refusing managed writes.'
+          absent_config_dry_run_refusal_marker='[bootstrap] FATAL: no existing OpenClaw config needs migration; workspace migration was not run because OPENCLAW_CONFIG_MIGRATION=dry-run is inspection-only. No config, workspace, backup, or SQLite state was created.'
 
           cleanup() {
-            docker rm -f "$workspace_container" "$workspace_restart_container" "$refusal_container" "$dry_run_container" >/dev/null 2>&1 || true
+            docker rm -f "$workspace_container" "$workspace_restart_container" "$refusal_container" "$dry_run_container" "$absent_config_dry_run_container" >/dev/null 2>&1 || true
             if [ -n "$workspace_fixture_dir" ]; then
               rm -rf "$workspace_fixture_dir"
             fi
-            docker volume rm -f "$workspace_volume" "$refusal_volume" "$dry_run_volume" >/dev/null 2>&1 || true
+            docker volume rm -f "$workspace_volume" "$refusal_volume" "$dry_run_volume" "$absent_config_dry_run_volume" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
 
@@ -949,6 +952,7 @@ jobs:
           docker volume create "$workspace_volume" >/dev/null
           docker volume create "$refusal_volume" >/dev/null
           docker volume create "$dry_run_volume" >/dev/null
+          docker volume create "$absent_config_dry_run_volume" >/dev/null
           docker run --rm --entrypoint /bin/sh \
             -v "$workspace_volume:/home/node/.openclaw" \
             -v "$workspace_fixture_dir:/fixtures:ro" \
@@ -1034,6 +1038,97 @@ jobs:
                   "SELECT COUNT(*) AS count FROM migration_sources WHERE migration_kind = ?"
                 ).get("legacy-workspace-setup-files").count) !== 0) {
                   fail("valid-config dry-run created a workspace import receipt");
+                }
+              } finally {
+                db.close();
+              }
+            }
+          '
+
+          # A first-run dry-run has no persisted config to inspect. It must
+          # stop before creating `{}`, touching the valid source, or reaching
+          # the workspace helper.
+          docker run --rm --entrypoint /bin/sh \
+            -v "$absent_config_dry_run_volume:/home/node/.openclaw" \
+            -v "$workspace_fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" \
+            -ceu '
+              mkdir -p /home/node/.openclaw/workspace-borges
+              cp /fixtures/borges.json /home/node/.openclaw/workspace-borges/openclaw-workspace-state.json
+            '
+          docker run --rm --entrypoint node \
+            -v "$absent_config_dry_run_volume:/home/node/.openclaw:ro" \
+            -v "$workspace_fixture_dir:/fixtures" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const source = "/home/node/.openclaw/workspace-borges/openclaw-workspace-state.json";
+            const stat = fs.lstatSync(source);
+            fs.writeFileSync("/fixtures/absent-config-dry-run-source-identity.json", JSON.stringify({
+              dev: String(stat.dev),
+              ino: String(stat.ino),
+              mode: stat.mode,
+              nlink: stat.nlink,
+              size: stat.size,
+            }));
+          '
+          start_workspace_dry_run "$absent_config_dry_run_container" "$absent_config_dry_run_volume"
+          if ! wait_for_exit "$absent_config_dry_run_container"; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: absent-config dry-run did not stop before gateway startup; logs withheld to protect persisted values" 1>&2
+            exit 1
+          fi
+          absent_config_dry_run_exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$absent_config_dry_run_container")
+          absent_config_dry_run_log=$(docker logs "$absent_config_dry_run_container" 2>&1 || true)
+          if [ "$absent_config_dry_run_exit_code" = "0" ]; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: absent-config dry-run exited successfully" 1>&2
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$absent_config_dry_run_log" | grep -Fxc "$absent_config_dry_run_refusal_marker" || true)" != "1" ]; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: absent-config dry-run omitted its exact no-existing-config refusal" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$absent_config_dry_run_log" | grep -Fq 'workspace-migration:'; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: absent-config dry-run invoked the workspace helper" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint node \
+            -v "$absent_config_dry_run_volume:/home/node/.openclaw:ro" \
+            -v "$workspace_fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const fail = (message) => { console.error(`WORKSPACE UPGRADE SMOKE FAIL: ${message}`); process.exit(1); };
+            const configDir = "/home/node/.openclaw";
+            const source = path.join(configDir, "workspace-borges", "openclaw-workspace-state.json");
+            const backup = `${source}.openclaw-2026.8.1-pre-migration.bak`;
+            if (fs.readdirSync(configDir).includes("openclaw.json")) fail("absent-config dry-run created openclaw.json");
+            const expected = JSON.parse(fs.readFileSync("/fixtures/absent-config-dry-run-source-identity.json", "utf8"));
+            const actual = fs.lstatSync(source);
+            if (!actual.isFile()) fail("absent-config dry-run changed the legacy source type");
+            for (const key of ["dev", "ino", "mode", "nlink", "size"]) {
+              const value = key === "dev" || key === "ino" ? String(actual[key]) : actual[key];
+              if (value !== expected[key]) fail(`absent-config dry-run changed source identity field ${key}`);
+            }
+            if (!fs.readFileSync(source).equals(fs.readFileSync("/fixtures/borges.json"))) {
+              fail("absent-config dry-run changed legacy source bytes");
+            }
+            if (fs.existsSync(backup) || fs.existsSync(`${source}.doctor-importing`)) {
+              fail("absent-config dry-run created a workspace backup or source claim");
+            }
+            const dbPath = path.join(configDir, "state", "openclaw.sqlite");
+            if (fs.existsSync(dbPath)) {
+              const { DatabaseSync } = require("node:sqlite");
+              const db = new DatabaseSync(dbPath, { readOnly: true });
+              try {
+                const tables = new Set(db.prepare(
+                  "SELECT name FROM sqlite_master WHERE type = ? AND name IN (?, ?)"
+                ).all("table", "workspace_setup_state", "migration_sources").map((row) => row.name));
+                if (tables.has("workspace_setup_state") && Number(db.prepare("SELECT COUNT(*) AS count FROM workspace_setup_state").get().count) !== 0) {
+                  fail("absent-config dry-run created workspace setup SQLite state");
+                }
+                if (tables.has("migration_sources") && Number(db.prepare(
+                  "SELECT COUNT(*) AS count FROM migration_sources WHERE migration_kind = ?"
+                ).get("legacy-workspace-setup-files").count) !== 0) {
+                  fail("absent-config dry-run created a workspace import receipt");
                 }
               } finally {
                 db.close();
