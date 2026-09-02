@@ -22,6 +22,8 @@ on:
       - Dockerfile
       - docker/**
       - scripts/migrate-openclaw-2-config.py
+      - scripts/build-openclaw-workspace-migration-adapter.mjs
+      - scripts/migrate-openclaw-legacy-workspaces.mjs
       - .github/workflows/build-image.yml
   schedule:
     - cron: "23 5 * * *" # daily, off the :00 herd
@@ -796,6 +798,390 @@ jobs:
             exit 1
           fi
           echo "PERSISTED-CONFIG UPGRADE SMOKE OK"
+
+      # PERSISTED MULTI-WORKSPACE UPGRADE GATE: exercise only the upstream
+      # workspace-state importer through the image's normal ENTRYPOINT. The
+      # keyed roster intentionally omits workspace fields: `main` owns the
+      # implicit default while the five named agents resolve their own implicit
+      # workspace-<id> directories. Each source uses the exact v2026.8.1 setup
+      # schema (only allowed keys and ISO timestamps), so this catches adapter
+      # discovery, backup, import receipt, source retirement, and restart
+      # idempotence without invoking broad doctor --fix.
+      - name: Persisted multi-workspace upgrade smoke
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          set -eu
+          workspace_container=smoke-workspace-upgrade
+          workspace_restart_container=smoke-workspace-upgrade-restart
+          refusal_container=smoke-workspace-upgrade-refused
+          workspace_volume=smoke-workspace-upgrade-config
+          refusal_volume=smoke-workspace-upgrade-refusal-config
+          workspace_fixture_dir=""
+          workspace_config_secret='workspace-config-secret-7f4d89'
+          workspace_source_secret='workspace-source-secret-1c38ab'
+          backup_suffix='.openclaw-2026.8.1-pre-migration.bak'
+
+          cleanup() {
+            docker rm -f "$workspace_container" "$workspace_restart_container" "$refusal_container" >/dev/null 2>&1 || true
+            if [ -n "$workspace_fixture_dir" ]; then
+              rm -rf "$workspace_fixture_dir"
+            fi
+            docker volume rm -f "$workspace_volume" "$refusal_volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          gateway_ready() {
+            docker exec "$1" node -e 'fetch("http://127.0.0.1:18789/readyz", { signal: AbortSignal.timeout(2000) }).then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))'
+          }
+
+          wait_for_ready() {
+            for _ in $(seq 1 24); do
+              if [ "$(docker inspect -f '{{.State.Running}}' "$1")" != "true" ]; then
+                return 1
+              fi
+              if gateway_ready "$1"; then
+                return 0
+              fi
+              sleep 5
+            done
+            return 1
+          }
+
+          wait_for_exit() {
+            for _ in $(seq 1 24); do
+              if [ "$(docker inspect -f '{{.State.Running}}' "$1")" != "true" ]; then
+                return 0
+              fi
+              sleep 5
+            done
+            return 1
+          }
+
+          start_workspace_gateway() {
+            container=$1
+            volume=$2
+            docker run -d --name "$container" \
+              -v "$volume:/home/node/.openclaw" \
+              -e PUID=1000 -e PGID=1000 \
+              -e OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 \
+              -e OPENCLAW_GATEWAY_TOKEN=workspace-upgrade-smoke-token \
+              -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
+              -e CUSTOM_LLM_BASE_URL=http://127.0.0.1:9/v1 \
+              -e CUSTOM_LLM_API_KEY=workspace-upgrade-smoke \
+              -e CUSTOM_LLM_API_TYPE=openai-completions \
+              -e CUSTOM_LLM_MODEL_ID=workspace-upgrade-smoke-model \
+              "$DERIVED_IMAGE:smoke"
+          }
+
+          workspace_fixture_dir=$(mktemp -d)
+          cat > "$workspace_fixture_dir/openclaw.json" <<JSON
+          {
+            "gateway": {
+              "mode": "local",
+              "bind": "lan",
+              "controlUi": { "allowedOrigins": ["http://127.0.0.1:18789"] },
+              "auth": { "mode": "token" }
+            },
+            "agents": {
+              "entries": {
+                "main": { "default": true },
+                "borges": {},
+                "jeeves": {},
+                "babarsky": {},
+                "randal": {},
+                "glados": {}
+              }
+            },
+            "env": {
+              "vars": {
+                "WORKSPACE_MIGRATION_SMOKE_SECRET": "$workspace_config_secret"
+              }
+            }
+          }
+          JSON
+
+          make_setup_source() {
+            agent=$1
+            bootstrap_seeded_at=$2
+            setup_completed_at=$3
+            cat > "$workspace_fixture_dir/$agent.json" <<JSON
+          {
+            "version": 1,
+            "bootstrapSeededAt": "$bootstrap_seeded_at",
+            "setupCompletedAt": "$setup_completed_at"
+          }
+          JSON
+          }
+          make_setup_source borges 2026-07-15T10:00:00.000Z 2026-07-15T10:01:00.000Z
+          make_setup_source jeeves 2026-07-15T11:00:00.000Z 2026-07-15T11:01:00.000Z
+          make_setup_source babarsky 2026-07-15T12:00:00.000Z 2026-07-15T12:01:00.000Z
+          make_setup_source randal 2026-07-15T13:00:00.000Z 2026-07-15T13:01:00.000Z
+          make_setup_source glados 2026-07-15T14:00:00.000Z 2026-07-15T14:01:00.000Z
+          cat > "$workspace_fixture_dir/refusal-target.json" <<JSON
+          {
+            "version": 1,
+            "bootstrapSeededAt": "2026-07-15T15:00:00.000Z",
+            "setupCompletedAt": "2026-07-15T15:01:00.000Z",
+            "unrecognizedUserValue": "$workspace_source_secret"
+          }
+          JSON
+
+          docker volume create "$workspace_volume" >/dev/null
+          docker volume create "$refusal_volume" >/dev/null
+          docker run --rm --entrypoint /bin/sh \
+            -v "$workspace_volume:/home/node/.openclaw" \
+            -v "$workspace_fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" \
+            -ceu '
+              mkdir -p /home/node/.openclaw
+              cp /fixtures/openclaw.json /home/node/.openclaw/openclaw.json
+              for agent in borges jeeves babarsky randal glados; do
+                workspace="/home/node/.openclaw/workspace-$agent"
+                mkdir -p "$workspace"
+                cp "/fixtures/$agent.json" "$workspace/openclaw-workspace-state.json"
+              done
+            '
+
+          start_workspace_gateway "$workspace_container" "$workspace_volume"
+          if ! wait_for_ready "$workspace_container"; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: valid keyed multi-workspace fixture did not reach readiness; logs withheld to protect persisted values" 1>&2
+            exit 1
+          fi
+          workspace_log=$(docker logs "$workspace_container" 2>&1 || true)
+          if [ "$(printf '%s\n' "$workspace_log" | grep -Fxc '[bootstrap] workspace-migration: applied' || true)" != "1" ]; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: valid fixture did not emit exactly one applied workspace-migration marker" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$workspace_log" | grep -Fq "$workspace_config_secret" || printf '%s\n' "$workspace_log" | grep -Fq "$workspace_source_secret"; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: workspace migration log disclosed a persisted value" 1>&2
+            exit 1
+          fi
+
+          docker run --rm --entrypoint node \
+            -v "$workspace_volume:/home/node/.openclaw:ro" \
+            -v "$workspace_fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const crypto = require("node:crypto");
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const { DatabaseSync } = require("node:sqlite");
+            const fail = (message) => { console.error(`WORKSPACE UPGRADE SMOKE FAIL: ${message}`); process.exit(1); };
+            const configDir = "/home/node/.openclaw";
+            const sourceName = "openclaw-workspace-state.json";
+            const backupSuffix = ".openclaw-2026.8.1-pre-migration.bak";
+            const agentIds = ["borges", "jeeves", "babarsky", "randal", "glados"];
+            const expected = new Map(agentIds.map((agent) => {
+              const workspace = path.join(configDir, `workspace-${agent}`);
+              const fixture = fs.readFileSync(`/fixtures/${agent}.json`);
+              return [workspace, { fixture, state: JSON.parse(fixture) }];
+            }));
+            const sha256 = (bytes) => crypto.createHash("sha256").update(bytes).digest("hex");
+            for (const [workspace, { fixture }] of expected) {
+              const source = path.join(workspace, sourceName);
+              const backup = `${source}${backupSuffix}`;
+              if (fs.existsSync(source)) fail(`retired source remains at ${source}`);
+              if (fs.existsSync(`${source}.doctor-importing`)) fail(`upstream claim remains at ${source}`);
+              const backupStat = fs.lstatSync(backup);
+              if (!backupStat.isFile() || backupStat.nlink !== 1) fail(`backup is not an independent regular file at ${backup}`);
+              if (!fs.readFileSync(backup).equals(fixture)) fail(`backup is not byte-identical at ${backup}`);
+            }
+            const dbPath = path.join(configDir, "state", "openclaw.sqlite");
+            if (!fs.lstatSync(dbPath).isFile()) fail("upstream workspace SQLite state is missing");
+            const db = new DatabaseSync(dbPath, { readOnly: true });
+            try {
+              const setupRows = db.prepare(`
+                SELECT workspace_key, workspace_path, version, bootstrap_seeded_at, setup_completed_at
+                FROM workspace_setup_state
+                WHERE workspace_path IN (${agentIds.map(() => "?").join(",")})
+              `).all(...expected.keys());
+              if (setupRows.length !== expected.size) fail("SQLite setup state does not contain one row for every migrated workspace");
+              for (const row of setupRows) {
+                const wanted = expected.get(row.workspace_path);
+                if (!wanted) fail(`SQLite setup state has an unexpected workspace path ${row.workspace_path}`);
+                const workspaceKey = sha256(row.workspace_path);
+                if (row.workspace_key !== workspaceKey) fail(`SQLite workspace key is not canonical for ${row.workspace_path}`);
+                if (Number(row.version) !== 1) fail(`SQLite setup state version is invalid for ${row.workspace_path}`);
+                if (row.bootstrap_seeded_at !== wanted.state.bootstrapSeededAt || row.setup_completed_at !== wanted.state.setupCompletedAt) {
+                  fail(`SQLite setup timestamps differ from the imported source for ${row.workspace_path}`);
+                }
+              }
+              const receipts = db.prepare(`
+                SELECT source_path, source_sha256, source_record_count, removed_source, report_json
+                FROM migration_sources
+                WHERE migration_kind = ? AND target_table = ?
+                ORDER BY source_path
+              `).all("legacy-workspace-setup-files", "workspace_setup_state");
+              if (receipts.length !== expected.size) fail("SQLite does not contain exactly one import receipt per setup source");
+              const resolutions = new Set(["inserted", "merged", "replaced", "verified", "superseded"]);
+              for (const [workspace, { fixture }] of expected) {
+                const source = path.join(workspace, sourceName);
+                const receipt = receipts.find((candidate) => candidate.source_path === source);
+                if (!receipt) fail(`SQLite receipt is missing for ${source}`);
+                if (receipt.source_sha256 !== sha256(fixture) || Number(receipt.source_record_count) !== 2 || Number(receipt.removed_source) !== 1) {
+                  fail(`SQLite receipt is not authoritative for ${source}`);
+                }
+                const report = JSON.parse(receipt.report_json);
+                if (report.sourceKind !== "setup" || report.authoritative !== true || report.imported !== true || !resolutions.has(report.resolution)) {
+                  fail(`SQLite receipt report is not an authoritative setup import for ${source}`);
+                }
+              }
+            } finally {
+              db.close();
+            }
+          '
+
+          if ! gateway_ready "$workspace_container"; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: gateway lost readiness after workspace import assertions" 1>&2
+            exit 1
+          fi
+          docker stop -t 15 "$workspace_container" >/dev/null
+          docker rm "$workspace_container" >/dev/null
+          start_workspace_gateway "$workspace_restart_container" "$workspace_volume"
+          if ! wait_for_ready "$workspace_restart_container"; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: valid multi-workspace restart did not reach readiness; logs withheld to protect persisted values" 1>&2
+            exit 1
+          fi
+          restart_log=$(docker logs "$workspace_restart_container" 2>&1 || true)
+          if [ "$(printf '%s\n' "$restart_log" | grep -Fxc '[bootstrap] workspace-migration: no-op' || true)" != "1" ]; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: restart did not emit exactly one no-op workspace-migration marker" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$restart_log" | grep -Fq "$workspace_config_secret" || printf '%s\n' "$restart_log" | grep -Fq "$workspace_source_secret"; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: restart log disclosed a persisted value" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint node \
+            -v "$workspace_volume:/home/node/.openclaw:ro" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const { DatabaseSync } = require("node:sqlite");
+            const fail = (message) => { console.error(`WORKSPACE UPGRADE SMOKE FAIL: ${message}`); process.exit(1); };
+            const configDir = "/home/node/.openclaw";
+            const sourceName = "openclaw-workspace-state.json";
+            const backupSuffix = ".openclaw-2026.8.1-pre-migration.bak";
+            const agentIds = ["borges", "jeeves", "babarsky", "randal", "glados"];
+            const expectedBackups = new Set();
+            for (const agent of agentIds) {
+              const workspace = path.join(configDir, `workspace-${agent}`);
+              const source = path.join(workspace, sourceName);
+              const backup = `${source}${backupSuffix}`;
+              expectedBackups.add(backup);
+              if (fs.existsSync(source) || fs.existsSync(`${source}.doctor-importing`)) fail(`restart restored a retired source for ${agent}`);
+              if (!fs.lstatSync(backup).isFile()) fail(`restart lost the verified backup for ${agent}`);
+            }
+            const actualBackups = agentIds.flatMap((agent) => {
+              const workspace = path.join(configDir, `workspace-${agent}`);
+              return fs.readdirSync(workspace)
+                .filter((name) => name.endsWith(backupSuffix))
+                .map((name) => path.join(workspace, name));
+            });
+            if (actualBackups.length !== expectedBackups.size || actualBackups.some((backup) => !expectedBackups.has(backup))) {
+              fail("restart created a second or unexpected workspace migration backup");
+            }
+            const db = new DatabaseSync(path.join(configDir, "state", "openclaw.sqlite"), { readOnly: true });
+            try {
+              const receiptCount = db.prepare(
+                "SELECT COUNT(*) AS count FROM migration_sources WHERE migration_kind = ? AND target_table = ?"
+              ).get("legacy-workspace-setup-files", "workspace_setup_state").count;
+              if (Number(receiptCount) !== agentIds.length) fail("restart created an additional workspace import receipt");
+            } finally {
+              db.close();
+            }
+          '
+
+          docker run --rm --entrypoint /bin/sh \
+            -v "$refusal_volume:/home/node/.openclaw" \
+            -v "$workspace_fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" \
+            -ceu '
+              mkdir -p /home/node/.openclaw/workspace-borges
+              cp /fixtures/openclaw.json /home/node/.openclaw/openclaw.json
+              cp /fixtures/refusal-target.json /home/node/.openclaw/workspace-refusal-target.json
+              ln -s ../workspace-refusal-target.json /home/node/.openclaw/workspace-borges/openclaw-workspace-state.json
+            '
+          docker run --rm --entrypoint node \
+            -v "$refusal_volume:/home/node/.openclaw:ro" \
+            -v "$workspace_fixture_dir:/fixtures" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const source = "/home/node/.openclaw/workspace-borges/openclaw-workspace-state.json";
+            const stat = fs.lstatSync(source);
+            fs.writeFileSync("/fixtures/refusal-source-identity.json", JSON.stringify({
+              dev: String(stat.dev),
+              ino: String(stat.ino),
+              mode: stat.mode,
+              nlink: stat.nlink,
+              size: stat.size,
+              target: fs.readlinkSync(source),
+            }));
+          '
+
+          start_workspace_gateway "$refusal_container" "$refusal_volume"
+          if ! wait_for_exit "$refusal_container"; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: unsafe legacy source did not fail before gateway startup; logs withheld to protect persisted values" 1>&2
+            exit 1
+          fi
+          refusal_exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$refusal_container")
+          refusal_log=$(docker logs "$refusal_container" 2>&1 || true)
+          if [ "$refusal_exit_code" = "0" ]; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: unsafe legacy source exited successfully" 1>&2
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$refusal_log" | grep -Fxc '[bootstrap] workspace-migration: refused' || true)" != "1" ]; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: unsafe legacy source did not emit exactly one refused workspace-migration marker" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$refusal_log" | grep -Fq "$workspace_config_secret" || printf '%s\n' "$refusal_log" | grep -Fq "$workspace_source_secret"; then
+            echo "WORKSPACE UPGRADE SMOKE FAIL: refused migration log disclosed a persisted value" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint node \
+            -v "$refusal_volume:/home/node/.openclaw" \
+            -v "$workspace_fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const fail = (message) => { console.error(`WORKSPACE UPGRADE SMOKE FAIL: ${message}`); process.exit(1); };
+            const configDir = "/home/node/.openclaw";
+            const source = path.join(configDir, "workspace-borges", "openclaw-workspace-state.json");
+            const target = path.join(configDir, "workspace-refusal-target.json");
+            const expected = JSON.parse(fs.readFileSync("/fixtures/refusal-source-identity.json", "utf8"));
+            const actual = fs.lstatSync(source);
+            if (!actual.isSymbolicLink()) fail("refused migration replaced the legacy source symlink");
+            for (const key of ["dev", "ino", "mode", "nlink", "size"]) {
+              const value = key === "dev" || key === "ino" ? String(actual[key]) : actual[key];
+              if (value !== expected[key]) fail(`refused migration changed source identity field ${key}`);
+            }
+            if (fs.readlinkSync(source) !== expected.target) fail("refused migration changed the legacy source symlink target");
+            if (!fs.readFileSync(target).equals(fs.readFileSync("/fixtures/refusal-target.json"))) fail("refused migration changed legacy source bytes");
+            if (!fs.readFileSync(path.join(configDir, "openclaw.json")).equals(fs.readFileSync("/fixtures/openclaw.json"))) fail("refused migration changed config bytes before managed writes");
+            const backup = `${source}.openclaw-2026.8.1-pre-migration.bak`;
+            if (fs.existsSync(backup) || fs.existsSync(`${target}.openclaw-2026.8.1-pre-migration.bak`) || fs.existsSync(`${source}.doctor-importing`)) {
+              fail("refused migration created a backup or left an upstream source claim");
+            }
+            const dbPath = path.join(configDir, "state", "openclaw.sqlite");
+            if (fs.existsSync(dbPath)) {
+              const { DatabaseSync } = require("node:sqlite");
+              const db = new DatabaseSync(dbPath, { readOnly: true });
+              try {
+                const tables = new Set(db.prepare(
+                  "SELECT name FROM sqlite_master WHERE type = ? AND name IN (?, ?)"
+                ).all("table", "workspace_setup_state", "migration_sources").map((row) => row.name));
+                if (tables.has("workspace_setup_state") && Number(db.prepare("SELECT COUNT(*) AS count FROM workspace_setup_state").get().count) !== 0) {
+                  fail("refused migration created workspace setup SQLite state");
+                }
+                if (tables.has("migration_sources") && Number(db.prepare(
+                  "SELECT COUNT(*) AS count FROM migration_sources WHERE migration_kind = ?"
+                ).get("legacy-workspace-setup-files").count) !== 0) {
+                  fail("refused migration created a workspace import receipt");
+                }
+              } finally {
+                db.close();
+              }
+            }
+          '
+          echo "PERSISTED MULTI-WORKSPACE UPGRADE SMOKE OK"
 
       # Push happens only after the smoke gate passed (cache hit — instant).
       - name: Push
