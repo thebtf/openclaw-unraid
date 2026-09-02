@@ -470,6 +470,30 @@ case "$WORKSPACE_MIGRATION_RESULT" in
     ;;
 esac
 
+# --- SESSION LEGACY STATE (PUID, focused upstream importer only) ---
+# Doctor owns SQLite schema migration, durable writes, validation, manifests,
+# and archive publication. The helper keeps its raw JSON report out of logs.
+if ! SESSION_MIGRATION_RESULT=$(run_as_puid node /usr/local/bin/migrate-openclaw-legacy-sessions.mjs); then
+  case "$SESSION_MIGRATION_RESULT" in
+    'session-migration: failed code='*' status='*)
+      echo "[bootstrap] $SESSION_MIGRATION_RESULT" 1>&2
+      ;;
+    *)
+      echo "[bootstrap] session-migration: failed code=entrypoint-status status=unknown" 1>&2
+      ;;
+  esac
+  exit 1
+fi
+case "$SESSION_MIGRATION_RESULT" in
+  'session-migration: no-op'|'session-migration: applied targets='*)
+    echo "[bootstrap] $SESSION_MIGRATION_RESULT"
+    ;;
+  *)
+    echo "session-migration: failed code=entrypoint-status status=0" 1>&2
+    exit 1
+    ;;
+esac
+
 # --- MANAGED KEYS (every start, scalars only — idempotent, never destructive) ---
 # These are the template-owned gateway/logging fields. Deliberately NO
 # agents.list, NO models.providers here: those are seeded once below and

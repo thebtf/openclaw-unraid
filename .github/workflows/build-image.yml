@@ -24,6 +24,7 @@ on:
       - scripts/migrate-openclaw-2-config.py
       - scripts/build-openclaw-workspace-migration-adapter.mjs
       - scripts/migrate-openclaw-legacy-workspaces.mjs
+      - scripts/migrate-openclaw-legacy-sessions.mjs
       - .github/workflows/build-image.yml
   schedule:
     - cron: "23 5 * * *" # daily, off the :00 herd
@@ -1376,6 +1377,252 @@ jobs:
             }
           '
           echo "PERSISTED MULTI-WORKSPACE UPGRADE SMOKE OK"
+
+      # PERSISTED SESSION-STORE UPGRADE GATE: seed canonical SQLite through the exact image's public importer,
+      # then prove the entrypoint migrates a second agent source, archives it, preserves the seed, and converges.
+      - name: Persisted session-store upgrade smoke
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          set -eu
+          session_container=smoke-session-store-upgrade
+          session_restart_container=smoke-session-store-upgrade-restart
+          session_refusal_container=smoke-session-store-upgrade-refused
+          session_volume=smoke-session-store-upgrade-config
+          session_refusal_volume=smoke-session-store-upgrade-refusal-config
+          session_fixture_dir=""
+          session_config_secret='session-store-config-secret-8b9c2d'
+          cleanup() {
+            docker rm -f "$session_container" "$session_restart_container" "$session_refusal_container" >/dev/null 2>&1 || true
+            [ -z "$session_fixture_dir" ] || rm -rf "$session_fixture_dir"
+            docker volume rm -f "$session_volume" "$session_refusal_volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          gateway_ready() { docker exec "$1" node -e 'fetch("http://127.0.0.1:18789/readyz", { signal: AbortSignal.timeout(2000) }).then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))'; }
+          wait_for_ready() {
+            for _ in $(seq 1 24); do
+              [ "$(docker inspect -f '{{.State.Running}}' "$1")" = "true" ] || return 1
+              gateway_ready "$1" && return 0
+              sleep 5
+            done
+            return 1
+          }
+          wait_for_exit() {
+            for _ in $(seq 1 24); do
+              [ "$(docker inspect -f '{{.State.Running}}' "$1")" != "true" ] && return 0
+              sleep 5
+            done
+            return 1
+          }
+          start_session_gateway() {
+            container=$1; volume=$2
+            docker run -d --name "$container" \
+              -v "$volume:/home/node/.openclaw" \
+              -e PUID=1000 -e PGID=1000 \
+              -e OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 \
+              -e OPENCLAW_GATEWAY_TOKEN=session-store-upgrade-smoke-token \
+              -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
+              -e CUSTOM_LLM_BASE_URL=http://127.0.0.1:9/v1 \
+              -e CUSTOM_LLM_API_KEY=session-store-upgrade-smoke \
+              -e CUSTOM_LLM_API_TYPE=openai-completions \
+              -e CUSTOM_LLM_MODEL_ID=session-store-upgrade-smoke-model \
+              "$DERIVED_IMAGE:smoke"
+          }
+          session_fixture_dir=$(mktemp -d)
+          cat > "$session_fixture_dir/openclaw.json" <<JSON
+          {"gateway":{"mode":"local","bind":"lan","controlUi":{"allowedOrigins":["http://127.0.0.1:18789"]},"auth":{"mode":"token"}},"agents":{"entries":{"main":{"default":true},"borges":{}}},"env":{"vars":{"SESSION_STORE_SMOKE_SECRET":"$session_config_secret"}}}
+          JSON
+          make_legacy_source() {
+            agent=$1; session_id=$2
+            cat > "$session_fixture_dir/$agent-sessions.json" <<JSON
+          {"agent:$agent:main":{"channel":"cli","chatType":"direct","sessionFile":"$agent-session.jsonl","sessionId":"$session_id","sessionStartedAt":1000,"updatedAt":2000}}
+          JSON
+            cat > "$session_fixture_dir/$agent-session.jsonl" <<JSON
+          {"type":"session","sessionId":"$session_id"}
+          {"type":"event","id":"event-$agent"}
+          JSON
+          }
+          make_legacy_source main main-sentinel-session
+          make_legacy_source borges borges-import-session
+          printf '%s\n' '{"agent:borges:main":' > "$session_fixture_dir/malformed-sessions.json"
+
+          docker volume create "$session_volume" >/dev/null
+          docker volume create "$session_refusal_volume" >/dev/null
+          docker run --rm --entrypoint /bin/sh \
+            -v "$session_volume:/home/node/.openclaw" \
+            -v "$session_fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -ceu '
+              mkdir -p /home/node/.openclaw/agents/main/sessions
+              cp /fixtures/openclaw.json /home/node/.openclaw/openclaw.json
+              cp /fixtures/main-sessions.json /home/node/.openclaw/agents/main/sessions/sessions.json
+              cp /fixtures/main-session.jsonl /home/node/.openclaw/agents/main/sessions/main-session.jsonl
+              chown -R 1000:1000 /home/node/.openclaw
+            '
+          if ! docker run --rm --user 1000:1000 --entrypoint node \
+            -v "$session_volume:/home/node/.openclaw" \
+            "$DERIVED_IMAGE:smoke" /app/dist/index.js doctor --session-sqlite import --session-sqlite-all-agents --json \
+            > "$session_fixture_dir/seed-report.json" 2> "$session_fixture_dir/seed-error.log"; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: public seed importer did not complete" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint /bin/sh \
+            -v "$session_volume:/home/node/.openclaw" \
+            -v "$session_fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -ceu '
+              mkdir -p /home/node/.openclaw/agents/borges/sessions
+              cp /fixtures/borges-sessions.json /home/node/.openclaw/agents/borges/sessions/sessions.json
+              cp /fixtures/borges-session.jsonl /home/node/.openclaw/agents/borges/sessions/borges-session.jsonl
+              chown -R 1000:1000 /home/node/.openclaw/agents/borges
+            '
+
+          start_session_gateway "$session_container" "$session_volume"
+          if ! wait_for_ready "$session_container"; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: migrated session fixture did not reach readiness; logs withheld to protect persisted values" 1>&2
+            exit 1
+          fi
+          session_log=$(docker logs "$session_container" 2>&1 || true)
+          if [ "$(printf '%s\n' "$session_log" | grep -Fxc '[bootstrap] session-migration: applied targets=1 entries=1 events=2' || true)" != "1" ]; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: helper did not emit the exact one-target applied count" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$session_log" | grep -Fq "$session_config_secret" || printf '%s\n' "$session_log" | grep -Fq '"targets"'; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: session migration log disclosed a fixture value or raw Doctor report" 1>&2
+            exit 1
+          fi
+          if ! docker run --rm --user 1000:1000 --entrypoint node \
+            -v "$session_volume:/home/node/.openclaw" \
+            "$DERIVED_IMAGE:smoke" /app/dist/index.js doctor --session-sqlite dry-run --session-sqlite-all-agents --json \
+            > "$session_fixture_dir/postflight.json" 2> "$session_fixture_dir/postflight-error.log"; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: focused postflight did not complete" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint node \
+            -v "$session_volume:/home/node/.openclaw:ro" \
+            -v "$session_fixture_dir:/fixtures" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const { DatabaseSync } = require("node:sqlite");
+            const fail = (message) => { console.error(`SESSION STORE UPGRADE SMOKE FAIL: ${message}`); process.exit(1); };
+            const configDir = "/home/node/.openclaw";
+            const mainDb = path.join(configDir, "agents", "main", "agent", "openclaw-agent.sqlite");
+            const borgesDb = path.join(configDir, "agents", "borges", "agent", "openclaw-agent.sqlite");
+            const borgesStore = path.join(configDir, "agents", "borges", "sessions", "sessions.json");
+            const borgesTranscript = path.join(configDir, "agents", "borges", "sessions", "borges-session.jsonl");
+            const manifestPaths = (directory) => !fs.existsSync(directory) ? [] : fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+              const child = path.join(directory, entry.name);
+              return entry.isDirectory() ? manifestPaths(child) : entry.isFile() && entry.name.endsWith(".json") ? [child] : [];
+            });
+            const manifests = manifestPaths(path.join(configDir, "session-sqlite-migration-runs")).sort().map((manifestPath) => ({ manifestPath, manifest: JSON.parse(fs.readFileSync(manifestPath, "utf8")) }));
+            if (manifests.length !== 2) fail("expected one public seed and one helper migration manifest");
+            const borgesManifest = manifests.find(({ manifest }) => Array.isArray(manifest.targets) && manifest.targets.some((target) => Array.isArray(target?.plannedMoves) && target.plannedMoves.some((move) => move?.sourcePath === borgesStore)));
+            const storeMove = borgesManifest?.manifest.targets.flatMap((target) => Array.isArray(target?.plannedMoves) ? target.plannedMoves : []).find((move) => move?.sourcePath === borgesStore);
+            if (!storeMove || typeof storeMove.archivePath !== "string" || !fs.lstatSync(storeMove.archivePath).isFile()) fail("helper migration did not publish an upstream archive for the legacy store");
+            if (fs.existsSync(borgesStore) || fs.existsSync(borgesTranscript)) fail("helper migration left the legacy source behind");
+            const postflight = JSON.parse(fs.readFileSync("/fixtures/postflight.json", "utf8"));
+            if (postflight.mode !== "dry-run" || postflight.totals?.targets !== 0 || postflight.totals?.issues !== 0 || postflight.totals?.legacyEntries !== 0) fail("postflight did not report zero legacy targets");
+            const assertEntry = (databasePath, sessionKey, sessionId) => {
+              const database = new DatabaseSync(databasePath, { readOnly: true });
+              try {
+                const row = database.prepare("SELECT COUNT(*) AS count, MIN(current_session_id) AS session_id FROM session_nodes WHERE session_key = ?").get(sessionKey);
+                if (Number(row.count) !== 1 || row.session_id !== sessionId) fail("canonical SQLite sentinel or imported session is missing");
+              } finally {
+                database.close();
+              }
+            };
+            assertEntry(mainDb, "agent:main:main", "main-sentinel-session");
+            assertEntry(borgesDb, "agent:borges:main", "borges-import-session");
+            for (const artifact of [mainDb, borgesDb, borgesManifest.manifestPath, storeMove.archivePath]) {
+              const stat = fs.lstatSync(artifact);
+              if (stat.uid !== 1000 || stat.gid !== 1000) fail("session migration artifact is not PUID-owned");
+            }
+            fs.writeFileSync("/fixtures/migrated-session-state.json", JSON.stringify({ manifestPaths: manifests.map(({ manifestPath }) => manifestPath) }));
+          '
+
+          docker stop -t 15 "$session_container" >/dev/null
+          docker rm "$session_container" >/dev/null
+          start_session_gateway "$session_restart_container" "$session_volume"
+          if ! wait_for_ready "$session_restart_container"; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: migrated session restart did not reach readiness; logs withheld to protect persisted values" 1>&2
+            exit 1
+          fi
+          restart_log=$(docker logs "$session_restart_container" 2>&1 || true)
+          if [ "$(printf '%s\n' "$restart_log" | grep -Fxc '[bootstrap] session-migration: no-op' || true)" != "1" ]; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: restart did not emit exactly one session-migration no-op" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$restart_log" | grep -Fq "$session_config_secret" || printf '%s\n' "$restart_log" | grep -Fq '"targets"'; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: restart log disclosed a fixture value or raw Doctor report" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint node \
+            -v "$session_volume:/home/node/.openclaw:ro" \
+            -v "$session_fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const { DatabaseSync } = require("node:sqlite");
+            const fail = (message) => { console.error(`SESSION STORE UPGRADE SMOKE FAIL: ${message}`); process.exit(1); };
+            const configDir = "/home/node/.openclaw";
+            const manifestPaths = (directory) => !fs.existsSync(directory) ? [] : fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+              const child = path.join(directory, entry.name);
+              return entry.isDirectory() ? manifestPaths(child) : entry.isFile() && entry.name.endsWith(".json") ? [child] : [];
+            });
+            const expected = JSON.parse(fs.readFileSync("/fixtures/migrated-session-state.json", "utf8"));
+            const actual = manifestPaths(path.join(configDir, "session-sqlite-migration-runs")).sort();
+            if (JSON.stringify(actual) !== JSON.stringify(expected.manifestPaths)) fail("restart created a new session migration manifest");
+            for (const [agent, sessionId] of [["main", "main-sentinel-session"], ["borges", "borges-import-session"]]) {
+              const database = new DatabaseSync(path.join(configDir, "agents", agent, "agent", "openclaw-agent.sqlite"), { readOnly: true });
+              try {
+                const row = database.prepare("SELECT COUNT(*) AS count FROM session_nodes WHERE session_key = ?").get(`agent:${agent}:main`);
+                if (Number(row.count) !== 1) fail(`restart duplicated the ${agent} session`);
+              } finally {
+                database.close();
+              }
+            }
+          '
+
+          docker run --rm --entrypoint /bin/sh \
+            -v "$session_refusal_volume:/home/node/.openclaw" \
+            -v "$session_fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -ceu '
+              mkdir -p /home/node/.openclaw/agents/borges/sessions
+              cp /fixtures/openclaw.json /home/node/.openclaw/openclaw.json
+              cp /fixtures/malformed-sessions.json /home/node/.openclaw/agents/borges/sessions/sessions.json
+              chown -R 1000:1000 /home/node/.openclaw
+            '
+          start_session_gateway "$session_refusal_container" "$session_refusal_volume"
+          if ! wait_for_exit "$session_refusal_container"; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: malformed session source did not fail before gateway startup; logs withheld to protect persisted values" 1>&2
+            exit 1
+          fi
+          refusal_exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$session_refusal_container")
+          refusal_log=$(docker logs "$session_refusal_container" 2>&1 || true)
+          if [ "$refusal_exit_code" = "0" ]; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: malformed session source exited successfully" 1>&2
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$refusal_log" | grep -Ec '^\[bootstrap\] session-migration: failed code=[a-z0-9-]+ status=[^[:space:]]+$' || true)" != "1" ]; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: malformed session source omitted its bounded failure detail" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$refusal_log" | grep -Fq "$session_config_secret" || printf '%s\n' "$refusal_log" | grep -Fq '"targets"'; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: malformed-source log disclosed a fixture value or raw Doctor report" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint node \
+            -v "$session_refusal_volume:/home/node/.openclaw:ro" \
+            -v "$session_fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const fail = (message) => { console.error(`SESSION STORE UPGRADE SMOKE FAIL: ${message}`); process.exit(1); };
+            const configDir = "/home/node/.openclaw";
+            if (!fs.readFileSync(path.join(configDir, "openclaw.json")).equals(fs.readFileSync("/fixtures/openclaw.json"))) fail("malformed source reached managed config writes");
+            const source = path.join(configDir, "agents", "borges", "sessions", "sessions.json");
+            if (!fs.readFileSync(source).equals(fs.readFileSync("/fixtures/malformed-sessions.json"))) fail("malformed source bytes changed before managed keys");
+            if (fs.existsSync(path.join(configDir, "session-sqlite-migration-runs"))) fail("malformed source created an upstream migration manifest");
+          '
+          echo "PERSISTED SESSION-STORE UPGRADE SMOKE OK"
 
       # Push happens only after the smoke gate passed (cache hit — instant).
       - name: Push
