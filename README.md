@@ -380,10 +380,20 @@ Functions that consume this:
 
 ## Updating
 
-Leave **Config Migration** at its default, `auto`, and use one normal image update. If the image recognizes the exact supported OpenClaw 2026.8.1 legacy or partial config shape, it first migrates a private byte-identical temporary copy and validates that candidate through the real OpenClaw CLI. Only then does it write a byte-exact adjacent backup, atomically apply the real migration, and start the gateway. Current config is a no-op and creates no backup. An unsupported or candidate-invalid config remains byte-identical, creates no real backup, and startup refuses. A normal restart is idempotent and does not create a second backup.
+Leave **Config Migration** at its default, `auto`, and use one normal image update. The image first handles only the exact supported OpenClaw 2026.8.1 legacy or partial **config** shape: it migrates a private byte-identical temporary copy, validates that candidate through the real OpenClaw CLI, then writes a byte-exact adjacent backup and atomically applies the real migration. Current config is a no-op and creates no backup.
+
+A failed config candidate is a config-migration failure, not a workspace-migration refusal: the real config remains byte-identical, no config migration backup is created, and managed writes stop. Its bounded fatal category is:
 
 ```
-existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape. It was left byte-identical and no migration backup was created. Preserve openclaw.json and recover it manually; do not run broad doctor --fix as an automatic upgrade step.
+[bootstrap] FATAL: existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape.
+```
+
+After config migration and native validation, the image automatically checks only legacy per-agent workspace setup state that the upstream OpenClaw importer recognizes. For every active recognized source, it verifies the byte-exact adjacent `<active-basename>.openclaw-2026.8.1-pre-migration.bak` backup before invoking the upstream workspace-only import, logs `workspace-migration: applied`, then starts the gateway normally. If no legacy workspace setup state remains, it emits `workspace-migration: no-op`; a normal restart is idempotent and creates no second workspace backup. A broad `doctor --fix` is neither needed nor run automatically.
+
+`workspace-migration: refused` covers only workspace state: the source is left for manual recovery and managed writes are refused. A malformed or unsafe source rejected during preflight remains byte-identical and creates no workspace backup, SQLite import, or source removal. A later refusal (for example, a runtime lock or warning after verified backups) does not discard those already verified backups; resolve the logged source identity instead of running broad `doctor --fix`.
+
+```
+workspace-migration: refused
 ```
 
 Older containers may persist `OPENCLAW_CONFIG_MIGRATION=check`. It remains compatible, warns that it is deprecated, and then behaves exactly like `auto` so the normal update still completes. For an explicit inspection that makes no real config write and creates no backup, set `OPENCLAW_CONFIG_MIGRATION=dry-run`; it prints the narrow plan and refuses startup. Then restart with `auto`, which is the default. Set `OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1` only for an explicit advanced apply during recovery.
@@ -535,6 +545,7 @@ The bootstrap prints `[bootstrap]` lines for every action. Common fatals:
 - `FATAL: OPENCLAW_CONFIG_MIGRATION='...' is invalid` — use `auto` (the default), `dry-run`, or `apply-v2026.8.1`; persisted `check` is accepted only as a deprecated `auto` compatibility alias.
 - `existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape` — the config was left byte-identical and no migration backup was created. Preserve `openclaw.json` and recover it manually. Do not run broad `doctor --fix` as an automatic upgrade step.
 - `candidate migration failed native OpenClaw validation` — the real config was left byte-identical and no migration backup was created; preserve `openclaw.json` and recover it manually.
+- `workspace-migration: refused` — the workspace helper failed closed before gateway start: an unsafe or ambiguous source, runtime record/hash/path check, lock, backup/import step, or final verification failed. Inspect the preceding bounded `FATAL:` line; preserve all legacy sources and any existing verified backups. Managed writes remain refused. Do not run broad `doctor --fix` automatically.
 
 To force a fully fresh config (loses any UI edits):
 ```bash

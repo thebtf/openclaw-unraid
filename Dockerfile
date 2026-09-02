@@ -37,7 +37,10 @@ USER root
 
 COPY docker/unraid-entrypoint.sh /usr/local/bin/unraid-entrypoint.sh
 COPY scripts/migrate-openclaw-2-config.py /usr/local/bin/migrate-openclaw-2-config.py
-RUN chmod 755 /usr/local/bin/unraid-entrypoint.sh /usr/local/bin/migrate-openclaw-2-config.py
+COPY scripts/build-openclaw-workspace-migration-adapter.mjs /usr/local/lib/build-openclaw-workspace-migration-adapter.mjs
+COPY scripts/migrate-openclaw-legacy-workspaces.mjs /usr/local/bin/migrate-openclaw-legacy-workspaces.mjs
+RUN node /usr/local/lib/build-openclaw-workspace-migration-adapter.mjs /app/dist /usr/local/lib/openclaw-unraid-workspace-migration.json && \
+  chmod 755 /usr/local/bin/unraid-entrypoint.sh /usr/local/bin/migrate-openclaw-2-config.py /usr/local/bin/migrate-openclaw-legacy-workspaces.mjs
 
 # mcporter: MCP-client CLI consumed by the bundled `mcporter` skill
 # (/app/skills/mcporter requires the `mcporter` bin). Baked into the image so
