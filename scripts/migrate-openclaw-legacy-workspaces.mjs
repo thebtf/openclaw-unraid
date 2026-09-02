@@ -12,10 +12,15 @@ import fsConstants from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { TextDecoder } from "node:util";
 
 const RECORD_PATH = "/usr/local/lib/openclaw-unraid-workspace-migration.json";
 const ADAPTER_BASENAME = "openclaw-unraid-workspace-migration-adapter.mjs";
-const REQUIRED_ADAPTER_EXPORTS = ["detectLegacyWorkspaceState", "migrateLegacyWorkspaceState"];
+const REQUIRED_ADAPTER_EXPORTS = [
+ "detectLegacyWorkspaceState",
+ "migrateLegacyWorkspaceState",
+ "parseSource",
+];
 const BACKUP_SUFFIX = ".openclaw-2026.8.1-pre-migration.bak";
 const CLAIM_SUFFIX = ".doctor-importing";
 const SOURCE_MAX_BYTES = {
@@ -24,6 +29,8 @@ const SOURCE_MAX_BYTES = {
 };
 const RUNTIME_ARTIFACT_MAX_BYTES = 32 * 1024 * 1024;
 const RUNTIME_RECORD_MAX_BYTES = 16 * 1024;
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+const createdBackupIdentities = new Map();
 
 class WorkspaceMigrationRefused extends Error { }
 
@@ -314,6 +321,87 @@ async function inspectActiveSource(source) {
  return { source, ...snapshots[0] };
 }
 
+function buildSourceSnapshot(plan) {
+ const { bytes, fingerprint } = plan.snapshot;
+ if (bytes.length !== fingerprint.size) {
+  refuse();
+ }
+ let raw;
+ try {
+  raw = utf8Decoder.decode(bytes);
+ } catch {
+  refuse();
+ }
+ return {
+  sourcePath: plan.activePath,
+  dev: fingerprint.dev,
+  ino: fingerprint.ino,
+  mtimeMs: fingerprint.mtimeMs,
+  sha256: createHash("sha256").update(bytes).digest("hex"),
+  size: fingerprint.size,
+  raw,
+ };
+}
+
+function assertParsedSourceShape(source, parsed) {
+ if (
+  !isRecord(parsed) ||
+  parsed.kind !== source.kind ||
+  !Number.isSafeInteger(parsed.recordCount) ||
+  parsed.recordCount < 0 ||
+  !isRecord(parsed.value)
+ ) {
+  refuse();
+ }
+
+ if (source.kind === "setup") {
+  const allowedKeys = ["bootstrapSeededAt", "setupCompletedAt"];
+  if (Object.keys(parsed.value).some((key) => !allowedKeys.includes(key))) {
+   refuse();
+  }
+  for (const key of allowedKeys) {
+   if (parsed.value[key] !== undefined && typeof parsed.value[key] !== "string") {
+    refuse();
+   }
+  }
+  const expectedCount =
+   Number(parsed.value.bootstrapSeededAt !== undefined) +
+   Number(parsed.value.setupCompletedAt !== undefined);
+  if (parsed.recordCount !== expectedCount) {
+   refuse();
+  }
+  return;
+ }
+
+ if (
+  Object.keys(parsed.value).some((key) => key !== "attestedAtMs" && key !== "generatedHashes") ||
+  !Number.isSafeInteger(parsed.value.attestedAtMs) ||
+  parsed.value.attestedAtMs < 0 ||
+  !(parsed.value.generatedHashes instanceof Map)
+ ) {
+  refuse();
+ }
+ for (const [name, digest] of parsed.value.generatedHashes) {
+  if (typeof name !== "string" || typeof digest !== "string") {
+   refuse();
+  }
+ }
+ if (parsed.recordCount !== 1 + parsed.value.generatedHashes.size) {
+  refuse();
+ }
+}
+
+function preflightSource(adapter, plan) {
+ const snapshot = buildSourceSnapshot(plan);
+ let parsed;
+ try {
+  parsed = adapter.parseSource(plan.source, snapshot);
+ } catch {
+  refuse();
+ }
+ assertParsedSourceShape(plan.source, parsed);
+}
+
 async function writeAll(handle, bytes) {
  let offset = 0;
  while (offset < bytes.length) {
@@ -348,16 +436,106 @@ async function syncParentDirectory(directoryPath) {
  }
 }
 
+function sameCreatedBackupIdentity(current, created) {
+ return (
+  current.isFile() &&
+  current.nlink === 1 &&
+  (!created || (current.dev === created.dev && current.ino === created.ino))
+ );
+}
+
+async function syncParentDirectoryBestEffort(directoryPath) {
+ try {
+  await syncParentDirectory(directoryPath);
+ } catch {
+  // Cleanup must still report refusal when a filesystem cannot sync its directory.
+ }
+}
+
+async function verifyBackupAbsent(backupPath) {
+ try {
+  await fs.lstat(backupPath);
+ } catch (error) {
+  if (error?.code === "ENOENT") {
+   return;
+  }
+ }
+ refuse();
+}
+
+async function removeCreatedBackup(backupPath, createdIdentity) {
+ const parentDirectory = path.dirname(backupPath);
+ try {
+  await assertDirectoryWithoutSymlinks(parentDirectory);
+  let current;
+  try {
+   current = await fs.lstat(backupPath);
+  } catch (error) {
+   if (error?.code === "ENOENT") {
+    return;
+   }
+   refuse();
+  }
+  if (!sameCreatedBackupIdentity(current, createdIdentity)) {
+   refuse();
+  }
+  await fs.unlink(backupPath);
+  await verifyBackupAbsent(backupPath);
+ } finally {
+  await syncParentDirectoryBestEffort(parentDirectory);
+ }
+}
+
+async function rollbackCreatedBackups(backups) {
+ let cleanupFailed = false;
+ for (const backup of [...backups].reverse()) {
+  try {
+   const createdIdentity = createdBackupIdentities.get(backup.backupPath);
+   if (!createdIdentity) {
+    refuse();
+   }
+   await removeCreatedBackup(backup.backupPath, createdIdentity);
+   createdBackupIdentities.delete(backup.backupPath);
+  } catch {
+   cleanupFailed = true;
+  }
+ }
+ if (cleanupFailed) {
+  refuse();
+ }
+}
+
+async function closeHandleForCleanup(handle) {
+ if (!handle) {
+  return;
+ }
+ try {
+  await handle.close();
+ } catch {
+  // Continue to the path-bound cleanup; the final result remains refusal.
+ }
+}
+
+async function discardBackupAfterFailedCreation(backupPath, createdIdentity) {
+ try {
+  await removeCreatedBackup(backupPath, createdIdentity);
+ } catch {
+  // The caller reports refusal even if the best-effort cleanup could not finish.
+ }
+ refuse();
+}
+
 async function ensureVerifiedBackup(plan) {
  const backupPath = `${plan.activePath}${BACKUP_SUFFIX}`;
- await assertDirectoryWithoutSymlinks(path.dirname(backupPath));
+ const parentDirectory = path.dirname(backupPath);
+ await assertDirectoryWithoutSymlinks(parentDirectory);
 
  try {
   const existing = await openStableRegularFile(backupPath, SOURCE_MAX_BYTES[plan.source.kind]);
   if (!buffersEqual(existing.bytes, plan.snapshot.bytes)) {
    refuse();
   }
-  return;
+  return { backupPath, created: false };
  } catch (error) {
   if (error instanceof WorkspaceMigrationRefused) {
    let exists = false;
@@ -376,6 +554,8 @@ async function ensureVerifiedBackup(plan) {
  }
 
  let handle;
+ let created = false;
+ let createdIdentity;
  try {
   handle = await fs.open(
    backupPath,
@@ -385,22 +565,40 @@ async function ensureVerifiedBackup(plan) {
    noFollowFlag(),
    0o600,
   );
+  created = true;
+  createdIdentity = await handle.stat();
+  if (!createdIdentity.isFile() || createdIdentity.nlink !== 1) {
+   refuse();
+  }
   await writeAll(handle, plan.snapshot.bytes);
   await handle.sync();
  } catch {
-  refuse();
- } finally {
-  if (handle) {
-   await handle.close();
+  await closeHandleForCleanup(handle);
+  if (created && createdIdentity) {
+   await discardBackupAfterFailedCreation(backupPath, createdIdentity);
   }
- }
- await syncParentDirectory(path.dirname(backupPath));
-
-
- const verified = await openStableRegularFile(backupPath, SOURCE_MAX_BYTES[plan.source.kind]);
- if (!buffersEqual(verified.bytes, plan.snapshot.bytes)) {
   refuse();
  }
+
+ try {
+  await handle.close();
+  handle = undefined;
+ } catch {
+  await discardBackupAfterFailedCreation(backupPath, createdIdentity);
+ }
+
+ try {
+  await syncParentDirectory(parentDirectory);
+  const verified = await openStableRegularFile(backupPath, SOURCE_MAX_BYTES[plan.source.kind]);
+  if (!buffersEqual(verified.bytes, plan.snapshot.bytes)) {
+   refuse();
+  }
+ } catch {
+  await discardBackupAfterFailedCreation(backupPath, createdIdentity);
+ }
+
+ createdBackupIdentities.set(backupPath, createdIdentity);
+ return { backupPath, created: true };
 }
 
 function hasWarnings(result) {
@@ -482,17 +680,30 @@ async function main() {
  for (const source of detected.sources) {
   plans.push(await inspectActiveSource(source));
  }
- for (const plan of plans) {
-  await ensureVerifiedBackup(plan);
- }
- for (const plan of plans) {
-  const current = await openStableRegularFile(
-   plan.activePath,
-   SOURCE_MAX_BYTES[plan.source.kind],
-  );
-  if (!snapshotsMatch(plan.snapshot, current)) {
-   refuse();
+
+ const createdBackups = [];
+ try {
+  for (const plan of plans) {
+   preflightSource(adapter, plan);
   }
+  for (const plan of plans) {
+   const backup = await ensureVerifiedBackup(plan);
+   if (backup.created) {
+    createdBackups.push(backup);
+   }
+  }
+  for (const plan of plans) {
+   const current = await openStableRegularFile(
+    plan.activePath,
+    SOURCE_MAX_BYTES[plan.source.kind],
+   );
+   if (!snapshotsMatch(plan.snapshot, current)) {
+    refuse();
+   }
+  }
+ } catch {
+  await rollbackCreatedBackups(createdBackups);
+  refuse();
  }
 
  let migrated;

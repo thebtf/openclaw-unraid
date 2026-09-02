@@ -328,9 +328,15 @@ docker restart OpenClaw
 ```
 保持 **Config Migration** 的默认值 `auto`，然后执行一次正常镜像更新。镜像首先只处理确切受支持的 OpenClaw 2026.8.1 legacy 或 partial **配置**形态：它迁移逐字节一致的私有临时副本，用真实的 OpenClaw CLI 验证该候选副本，然后在相邻位置创建逐字节一致的备份并原子地应用真实迁移。当前配置不会被修改，也不会创建备份。
 
+配置候选副本失败属于配置迁移失败，而不是工作区迁移拒绝：真实配置保持逐字节不变，不会创建配置迁移备份，且托管写入会停止。其受限的 fatal 类别为：
+
+```
+[bootstrap] FATAL: existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape.
+```
+
 在配置迁移和原生验证之后，镜像还会自动检查仅由上游 OpenClaw 导入器识别的每智能体 legacy 工作区设置状态。对于每个活动的已识别源，在调用上游仅工作区导入前，它都会验证名为 `<active-basename>.openclaw-2026.8.1-pre-migration.bak` 的逐字节一致相邻备份，输出 `workspace-migration: applied`，然后正常启动网关。如果没有剩余的 legacy 工作区设置状态，它会输出 `workspace-migration: no-op`；正常重启是幂等的，也不会创建第二个工作区备份。不需要宽泛的 `doctor --fix`，也不会自动运行它。
 
-如果配置不受支持/候选副本未通过验证，或者上游工作区检查给出警告或无法唯一识别有效源，启动会在工作区变更前停止。受影响的工作区文件保持逐字节不变；不会创建工作区备份、不会导入 SQLite、也不会删除源。源会保留以供手动恢复，且托管写入会被拒绝；请解决日志中报告的源身份问题，而不是运行宽泛的 `doctor --fix`。
+`workspace-migration: refused` 仅适用于工作区状态：源会保留以供手动恢复，且托管写入会被拒绝。预检时被拒绝的格式错误或不安全源保持逐字节不变，不会创建工作区备份、SQLite 导入或源删除。较晚的拒绝（例如，已验证备份后的运行时锁或警告）不会丢弃已验证备份；请解决日志中报告的源身份问题，而不是运行宽泛的 `doctor --fix`。
 
 ```
 workspace-migration: refused
@@ -433,7 +439,7 @@ docker logs OpenClaw 2>&1 | tail -50
 - `FATAL: OPENCLAW_CONFIG_MIGRATION='...' is invalid` —— 使用 `auto`（默认值）、`dry-run` 或 `apply-v2026.8.1`；持久化的 `check` 仅作为已弃用的 `auto` 兼容别名被接受。
 - `existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape` —— 配置保持逐字节不变，未创建迁移备份。保留 `openclaw.json` 并手动恢复。不要将宽泛的 `doctor --fix` 作为自动更新步骤运行。
 - `candidate migration failed native OpenClaw validation` —— 真实配置保持逐字节不变，未创建迁移备份；请保留 `openclaw.json` 并手动恢复。
-- `workspace-migration: refused` —— 上游发现警告、格式错误/不安全状态或来源不明确。legacy 工作区源会保留以供手动恢复，且托管写入被拒绝；请解决日志中报告的源身份问题。未发生工作区变更、备份、SQLite 导入或源删除。不要运行宽泛的 `doctor --fix`。
+- `workspace-migration: refused` —— 上游发现警告、格式错误/不安全状态或来源不明确。legacy 工作区源会保留以供手动恢复，且托管写入被拒绝；请解决日志中报告的源身份问题。预检时被拒绝的格式错误或不安全源保持不变，不会创建工作区备份、SQLite 导入或源删除。较晚的拒绝可能保留已验证备份。不要运行宽泛的 `doctor --fix`。
 
 强制重置为全新配置（会丢失 UI 中的所有编辑）：
 ```bash

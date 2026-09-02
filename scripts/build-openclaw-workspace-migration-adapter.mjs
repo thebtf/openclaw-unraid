@@ -12,7 +12,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-const REQUIRED_EXPORTS = ["detectLegacyWorkspaceState", "migrateLegacyWorkspaceState"];
+const REQUIRED_EXPORTS = [
+ "detectLegacyWorkspaceState",
+ "migrateLegacyWorkspaceState",
+ "parseSource",
+];
 const ADAPTER_BASENAME = "openclaw-unraid-workspace-migration-adapter.mjs";
 const RECORD_VERSION = 1;
 const CONFIG_FACADE_RELATIVE_PATH = "index.js";
@@ -66,7 +70,7 @@ function patchDoctorModuleExports(source) {
 
  return [
   `${match.groups.body}${match.groups.separator}`.trimEnd(),
-  "export { detectLegacyWorkspaceState, migrateLegacyWorkspaceState };",
+  "export { detectLegacyWorkspaceState, migrateLegacyWorkspaceState, parseSource };",
   "",
  ].join("\n");
 }
