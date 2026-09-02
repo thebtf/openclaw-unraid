@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 /** Run the focused upstream session importer without exposing Doctor's raw report. */
 import { spawn } from "node:child_process";
-import fs from "node:fs";
-import path from "node:path";
 import { TextDecoder } from "node:util";
 
 const MAX_REPORT_BYTES = 64 * 1024 * 1024;
@@ -129,10 +127,23 @@ function childStatus(exitCode, signal) {
 function waitForChild(child) {
   return new Promise((resolve) => {
     let settled = false;
+    let outputBytes = 0;
+    let outputChunks = [];
+    let outputLimitExceeded = false;
+    let outputStreamFailed = false;
     const finish = (result) => {
       if (!settled) {
         settled = true;
         resolve(result);
+      }
+    };
+    const discardOutput = () => {
+      outputChunks = [];
+      outputBytes = 0;
+    };
+    const stopChild = () => {
+      if (!child.killed) {
+        child.kill("SIGKILL");
       }
     };
 
@@ -140,84 +151,86 @@ function waitForChild(child) {
       finish({ kind: "spawn", status: "spawn" });
     });
     child.once("close", (exitCode, signal) => {
-      finish({ kind: "closed", status: childStatus(exitCode, signal) });
+      if (outputLimitExceeded) {
+        finish({ kind: "report-limit", status: "limit" });
+        return;
+      }
+      if (outputStreamFailed) {
+        finish({ kind: "report-stream", status: "stream" });
+        return;
+      }
+      try {
+        finish({
+          kind: "closed",
+          status: childStatus(exitCode, signal),
+          stdout: Buffer.concat(outputChunks, outputBytes),
+        });
+      } catch {
+        finish({ kind: "report-stream", status: "stream" });
+      }
+    });
+
+    if (!child.stdout) {
+      outputStreamFailed = true;
+      stopChild();
+      return;
+    }
+    child.stdout.on("data", (chunk) => {
+      if (settled || outputLimitExceeded || outputStreamFailed) {
+        return;
+      }
+      const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      if (bytes.length > MAX_REPORT_BYTES - outputBytes) {
+        outputLimitExceeded = true;
+        discardOutput();
+        stopChild();
+        return;
+      }
+      outputChunks.push(bytes);
+      outputBytes += bytes.length;
+    });
+    child.stdout.once("error", () => {
+      if (settled) {
+        return;
+      }
+      outputStreamFailed = true;
+      discardOutput();
+      stopChild();
     });
   });
 }
 
 async function runDoctor(mode) {
-  let reportDirectory;
-  let reportFileDescriptor;
-  let reportFilePath;
+  let child;
   try {
-    reportDirectory = fs.mkdtempSync("/tmp/openclaw-session-migration-");
-    fs.chmodSync(reportDirectory, 0o700);
-    reportFilePath = path.join(reportDirectory, "doctor-report.json");
-    reportFileDescriptor = fs.openSync(reportFilePath, "wx", 0o600);
-    fs.chmodSync(reportFilePath, 0o600);
-
-    let child;
-    try {
-      child = spawn(
-        "node",
-        [
-          "/app/dist/index.js",
-          "doctor",
-          "--session-sqlite",
-          mode,
-          "--session-sqlite-all-agents",
-          "--json",
-        ],
-        { shell: false, stdio: ["ignore", reportFileDescriptor, "ignore"] },
-      );
-    } catch {
-      return { kind: "spawn", status: "spawn" };
-    }
-
-    const execution = await waitForChild(child);
-    fs.closeSync(reportFileDescriptor);
-    reportFileDescriptor = undefined;
-    if (execution.kind === "spawn") {
-      return execution;
-    }
-    if (execution.status !== "0") {
-      return { kind: "complete", status: execution.status };
-    }
-
-    const reportStats = fs.statSync(reportFilePath);
-    if (!reportStats.isFile() || reportStats.size > MAX_REPORT_BYTES) {
-      return { kind: "report-limit", status: execution.status };
-    }
-    return {
-      kind: "complete",
-      status: execution.status,
-      stdout: fs.readFileSync(reportFilePath),
-    };
+    child = spawn(
+      process.execPath,
+      [
+        "/app/dist/index.js",
+        "doctor",
+        "--session-sqlite",
+        mode,
+        "--session-sqlite-all-agents",
+        "--json",
+      ],
+      { shell: false, stdio: ["ignore", "pipe", "ignore"] },
+    );
   } catch {
-    return { kind: "report-file", status: "helper" };
-  } finally {
-    if (typeof reportFileDescriptor === "number") {
-      try {
-        fs.closeSync(reportFileDescriptor);
-      } catch {
-        // Nothing safe to report here; the status remains bounded.
-      }
-    }
-    if (reportFilePath) {
-      try {
-        fs.unlinkSync(reportFilePath);
-      } catch {
-        // The private directory remains inaccessible to other users.
-      }
-    }
-    if (reportDirectory) {
-      try {
-        fs.rmdirSync(reportDirectory);
-      } catch {
-        // Never widen cleanup beyond this helper-owned directory.
-      }
-    }
+    return { kind: "spawn", status: "spawn" };
   }
+
+  const execution = await waitForChild(child);
+  if (execution.kind !== "closed") {
+    return execution;
+  }
+  if (execution.status !== "0") {
+    return { kind: "complete", status: execution.status };
+  }
+  return {
+    kind: "complete",
+    status: execution.status,
+    stdout: execution.stdout,
+  };
 }
 
 function emitFailure(code, status) {
@@ -230,8 +243,8 @@ function requireReport(execution, phase) {
     emitFailure(`${phase}-spawn`, execution.status);
     return undefined;
   }
-  if (execution.kind === "report-file") {
-    emitFailure(`${phase}-report-file`, execution.status);
+  if (execution.kind === "report-stream") {
+    emitFailure(`${phase}-report-stream`, execution.status);
     return undefined;
   }
   if (execution.kind === "report-limit") {

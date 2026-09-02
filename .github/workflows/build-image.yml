@@ -1445,9 +1445,22 @@ jobs:
           make_legacy_source borges borges-import-session
           printf '%s\n' '{"agent:borges:main":' > "$session_fixture_dir/malformed-sessions.json"
           printf '%s\n' '{}' > "$session_fixture_dir/glados-sessions.json"
+          cat > "$session_fixture_dir/oversized-doctor-report.mjs" <<'JS'
+          process.stdout.write("x".repeat(64 * 1024 * 1024 + 1));
+          JS
 
           docker volume create "$session_volume" >/dev/null
           docker volume create "$session_refusal_volume" >/dev/null
+          if oversized_output=$(docker run --rm --user 1000:1000 --entrypoint node \
+            -v "$session_fixture_dir/oversized-doctor-report.mjs:/app/dist/index.js:ro" \
+            "$DERIVED_IMAGE:smoke" /usr/local/bin/migrate-openclaw-legacy-sessions.mjs 2>/dev/null); then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: helper accepted oversized Doctor output" 1>&2
+            exit 1
+          fi
+          if [ "$oversized_output" != "session-migration: failed code=preflight-output-limit status=limit" ]; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: helper did not bound oversized Doctor output" 1>&2
+            exit 1
+          fi
           docker run --rm --entrypoint /bin/sh \
             -v "$session_volume:/home/node/.openclaw" \
             -v "$session_fixture_dir:/fixtures:ro" \
