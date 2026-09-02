@@ -7,7 +7,7 @@
  * functions selected at image build. It supplies the safety boundary around
  * that importer: stable no-link snapshots and verified adjacent backups.
  */
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import fsConstants from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -30,7 +30,6 @@ const SOURCE_MAX_BYTES = {
 const RUNTIME_ARTIFACT_MAX_BYTES = 32 * 1024 * 1024;
 const RUNTIME_RECORD_MAX_BYTES = 16 * 1024;
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
-const createdBackupIdentities = new Map();
 
 class WorkspaceMigrationRefused extends Error { }
 
@@ -436,11 +435,13 @@ async function syncParentDirectory(directoryPath) {
  }
 }
 
-function sameCreatedBackupIdentity(current, created) {
+function hasAttemptOwnedFileIdentity(current, identity, allowedLinks) {
  return (
+  Boolean(identity) &&
   current.isFile() &&
-  current.nlink === 1 &&
-  (!created || (current.dev === created.dev && current.ino === created.ino))
+  current.dev === identity.dev &&
+  current.ino === identity.ino &&
+  allowedLinks.includes(current.nlink)
  );
 }
 
@@ -463,39 +464,50 @@ async function verifyBackupAbsent(backupPath) {
  refuse();
 }
 
-async function removeCreatedBackup(backupPath, createdIdentity) {
- const parentDirectory = path.dirname(backupPath);
+async function removeAttemptOwnedFile(filePath, identity, allowedLinks) {
+ const parentDirectory = path.dirname(filePath);
  try {
   await assertDirectoryWithoutSymlinks(parentDirectory);
   let current;
   try {
-   current = await fs.lstat(backupPath);
+   current = await fs.lstat(filePath);
   } catch (error) {
    if (error?.code === "ENOENT") {
     return;
    }
    refuse();
   }
-  if (!sameCreatedBackupIdentity(current, createdIdentity)) {
+  if (!hasAttemptOwnedFileIdentity(current, identity, allowedLinks)) {
    refuse();
   }
-  await fs.unlink(backupPath);
-  await verifyBackupAbsent(backupPath);
+  await fs.unlink(filePath);
+  await verifyBackupAbsent(filePath);
  } finally {
   await syncParentDirectoryBestEffort(parentDirectory);
  }
 }
 
+async function cleanupAttemptPaths(paths, identity) {
+ let cleanupFailed = false;
+ for (const { filePath, allowedLinks } of paths) {
+  try {
+   await removeAttemptOwnedFile(filePath, identity, allowedLinks);
+  } catch {
+   cleanupFailed = true;
+  }
+ }
+ return !cleanupFailed;
+}
+
 async function rollbackCreatedBackups(backups) {
  let cleanupFailed = false;
  for (const backup of [...backups].reverse()) {
+  if (!backup.created || !backup.createdIdentity) {
+   cleanupFailed = true;
+   continue;
+  }
   try {
-   const createdIdentity = createdBackupIdentities.get(backup.backupPath);
-   if (!createdIdentity) {
-    refuse();
-   }
-   await removeCreatedBackup(backup.backupPath, createdIdentity);
-   createdBackupIdentities.delete(backup.backupPath);
+   await removeAttemptOwnedFile(backup.backupPath, backup.createdIdentity, [1]);
   } catch {
    cleanupFailed = true;
   }
@@ -516,13 +528,11 @@ async function closeHandleForCleanup(handle) {
  }
 }
 
-async function discardBackupAfterFailedCreation(backupPath, createdIdentity) {
- try {
-  await removeCreatedBackup(backupPath, createdIdentity);
- } catch {
-  // The caller reports refusal even if the best-effort cleanup could not finish.
- }
- refuse();
+function createStagingPath(backupPath) {
+ return path.join(
+  path.dirname(backupPath),
+  `.${path.basename(backupPath)}.stage-${randomUUID()}`,
+ );
 }
 
 async function ensureVerifiedBackup(plan) {
@@ -543,7 +553,7 @@ async function ensureVerifiedBackup(plan) {
     await fs.lstat(backupPath);
     exists = true;
    } catch {
-    // A missing backup is the only case where this helper may create one.
+    // A missing final backup is the only case where this helper may publish one.
    }
    if (exists) {
     throw error;
@@ -553,52 +563,80 @@ async function ensureVerifiedBackup(plan) {
   }
  }
 
- let handle;
- let created = false;
- let createdIdentity;
+ const stagingPath = createStagingPath(backupPath);
+ let stagingHandle;
+ let stagingIdentity;
+ let published = false;
  try {
-  handle = await fs.open(
-   backupPath,
+  stagingHandle = await fs.open(
+   stagingPath,
    fsConstants.constants.O_WRONLY |
    fsConstants.constants.O_CREAT |
    fsConstants.constants.O_EXCL |
    noFollowFlag(),
    0o600,
   );
-  created = true;
-  createdIdentity = await handle.stat();
-  if (!createdIdentity.isFile() || createdIdentity.nlink !== 1) {
+  stagingIdentity = await stagingHandle.stat();
+  if (!stagingIdentity.isFile() || stagingIdentity.nlink !== 1) {
    refuse();
   }
-  await writeAll(handle, plan.snapshot.bytes);
-  await handle.sync();
+  await writeAll(stagingHandle, plan.snapshot.bytes);
+  const writtenIdentity = await stagingHandle.stat();
+  if (!hasAttemptOwnedFileIdentity(writtenIdentity, stagingIdentity, [1])) {
+   refuse();
+  }
+  await stagingHandle.sync();
+  await stagingHandle.close();
+  stagingHandle = undefined;
+
+  const staged = await openStableRegularFile(stagingPath, SOURCE_MAX_BYTES[plan.source.kind]);
+  if (
+   !hasAttemptOwnedFileIdentity(staged.fingerprint, stagingIdentity, [1]) ||
+   !buffersEqual(staged.bytes, plan.snapshot.bytes)
+  ) {
+   refuse();
+  }
+
+  await assertDirectoryWithoutSymlinks(parentDirectory);
+  await fs.link(stagingPath, backupPath);
+  published = true;
+  const linkedFinal = await fs.lstat(backupPath);
+  const linkedStaging = await fs.lstat(stagingPath);
+  if (
+   !hasAttemptOwnedFileIdentity(linkedFinal, stagingIdentity, [2]) ||
+   !hasAttemptOwnedFileIdentity(linkedStaging, stagingIdentity, [2])
+  ) {
+   refuse();
+  }
+  await fs.unlink(stagingPath);
+  await verifyBackupAbsent(stagingPath);
+  await syncParentDirectory(parentDirectory);
+
+  const final = await openStableRegularFile(backupPath, SOURCE_MAX_BYTES[plan.source.kind]);
+  if (
+   !hasAttemptOwnedFileIdentity(final.fingerprint, stagingIdentity, [1]) ||
+   !buffersEqual(final.bytes, plan.snapshot.bytes)
+  ) {
+   refuse();
+  }
+  return { backupPath, created: true, createdIdentity: final.fingerprint };
  } catch {
-  await closeHandleForCleanup(handle);
-  if (created && createdIdentity) {
-   await discardBackupAfterFailedCreation(backupPath, createdIdentity);
+  await closeHandleForCleanup(stagingHandle);
+  if (stagingIdentity) {
+   if (published) {
+    await cleanupAttemptPaths(
+     [
+      { filePath: backupPath, allowedLinks: [1, 2] },
+      { filePath: stagingPath, allowedLinks: [1, 2] },
+     ],
+     stagingIdentity,
+    );
+   } else {
+    await cleanupAttemptPaths([{ filePath: stagingPath, allowedLinks: [1] }], stagingIdentity);
+   }
   }
   refuse();
  }
-
- try {
-  await handle.close();
-  handle = undefined;
- } catch {
-  await discardBackupAfterFailedCreation(backupPath, createdIdentity);
- }
-
- try {
-  await syncParentDirectory(parentDirectory);
-  const verified = await openStableRegularFile(backupPath, SOURCE_MAX_BYTES[plan.source.kind]);
-  if (!buffersEqual(verified.bytes, plan.snapshot.bytes)) {
-   refuse();
-  }
- } catch {
-  await discardBackupAfterFailedCreation(backupPath, createdIdentity);
- }
-
- createdBackupIdentities.set(backupPath, createdIdentity);
- return { backupPath, created: true };
 }
 
 function hasWarnings(result) {
