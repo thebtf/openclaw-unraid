@@ -388,7 +388,16 @@ A failed config candidate is a config-migration failure, not a workspace-migrati
 [bootstrap] FATAL: existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape.
 ```
 
-After config migration and native validation, the image automatically checks only legacy per-agent workspace setup state that the upstream OpenClaw importer recognizes. For every active recognized source, it verifies the byte-exact adjacent `<active-basename>.openclaw-2026.8.1-pre-migration.bak` backup before invoking the upstream workspace-only import, logs `workspace-migration: applied`, then starts the gateway normally. If no legacy workspace setup state remains, it emits `workspace-migration: no-op`; a normal restart is idempotent and creates no second workspace backup. A broad `doctor --fix` is neither needed nor run automatically.
+After config migration and native validation, the image automatically checks only legacy per-agent workspace setup state that the upstream OpenClaw importer recognizes. For every active recognized source, it verifies the byte-exact adjacent `<active-basename>.openclaw-2026.8.1-pre-migration.bak` backup before invoking the upstream workspace-only import, logs `workspace-migration: applied`, then continues bootstrap. If no legacy workspace setup state remains, it emits `workspace-migration: no-op`; a normal restart is idempotent and creates no second workspace backup. A broad `doctor --fix` is neither needed nor run automatically.
+After the existing config migration and validation, and after workspace migration, the image keeps the Gateway stopped and runs OpenClaw's focused all-agent session SQLite import. In the field-tested migration, OpenClaw created a migration manifest and archived the legacy session files only after validation. The import can take several minutes and compacts large existing SQLite databases.
+
+Before Gateway startup, the image runs the focused all-agent dry-run postflight and refuses startup unless it reports zero legacy targets and zero issues. To inspect the same state without importing, run this read-only diagnostic command in the container:
+
+```bash
+node /app/dist/index.js doctor --session-sqlite dry-run --session-sqlite-all-agents --json
+```
+
+The helper logs only `session-migration: no-op` or `session-migration: applied targets=<n> entries=<n> events=<n>`. A normal restart is idempotent. The image does not run broad `openclaw doctor` automatically. Separate plugin or logging warnings are not the `Legacy session store requires migration` blocker.
 
 `workspace-migration: refused` covers only workspace state: the source is left for manual recovery and managed writes are refused. A malformed or unsafe source rejected during preflight remains byte-identical and creates no workspace backup, SQLite import, or source removal. A later refusal (for example, a runtime lock or warning after verified backups) does not discard those already verified backups; resolve the logged source identity instead of running broad `doctor --fix`.
 

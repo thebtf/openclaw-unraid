@@ -334,7 +334,16 @@ docker restart OpenClaw
 [bootstrap] FATAL: existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape.
 ```
 
-在配置迁移和原生验证之后，镜像还会自动检查仅由上游 OpenClaw 导入器识别的每智能体 legacy 工作区设置状态。对于每个活动的已识别源，在调用上游仅工作区导入前，它都会验证名为 `<active-basename>.openclaw-2026.8.1-pre-migration.bak` 的逐字节一致相邻备份，输出 `workspace-migration: applied`，然后正常启动网关。如果没有剩余的 legacy 工作区设置状态，它会输出 `workspace-migration: no-op`；正常重启是幂等的，也不会创建第二个工作区备份。不需要宽泛的 `doctor --fix`，也不会自动运行它。
+在配置迁移和原生验证之后，镜像还会自动检查仅由上游 OpenClaw 导入器识别的每智能体 legacy 工作区设置状态。对于每个活动的已识别源，在调用上游仅工作区导入前，它都会验证名为 `<active-basename>.openclaw-2026.8.1-pre-migration.bak` 的逐字节一致相邻备份，输出 `workspace-migration: applied`，然后继续启动流程。如果没有剩余的 legacy 工作区设置状态，它会输出 `workspace-migration: no-op`；正常重启是幂等的，也不会创建第二个工作区备份。不需要宽泛的 `doctor --fix`，也不会自动运行它。
+在现有配置迁移和验证以及工作区迁移之后，镜像会保持 Gateway 停止，并运行 OpenClaw 的聚焦全智能体会话 SQLite 导入。在经过现场验证的迁移中，OpenClaw 仅在验证后才创建迁移清单并归档旧版会话文件。导入可能需要数分钟，并会压实大型现有 SQLite 数据库。
+
+Gateway 启动前，镜像会运行聚焦的全智能体 dry-run 后检，并且只有它报告零个旧版目标和零个问题时才会启动。要在不导入的情况下检查相同状态，请在容器中运行这条只读诊断命令：
+
+```bash
+node /app/dist/index.js doctor --session-sqlite dry-run --session-sqlite-all-agents --json
+```
+
+该帮助程序只输出 `session-migration: no-op` 或 `session-migration: applied targets=<n> entries=<n> events=<n>`。正常重启具有幂等性。镜像不会自动运行宽泛的 `openclaw doctor`。独立的插件或日志警告不是 `Legacy session store requires migration` 阻塞原因。
 
 `workspace-migration: refused` 仅适用于工作区状态：源会保留以供手动恢复，且托管写入会被拒绝。预检时被拒绝的格式错误或不安全源保持逐字节不变，不会创建工作区备份、SQLite 导入或源删除。较晚的拒绝（例如，已验证备份后的运行时锁或警告）不会丢弃已验证备份；请解决日志中报告的源身份问题，而不是运行宽泛的 `doctor --fix`。
 
