@@ -183,13 +183,15 @@ jobs:
             exit 1
           fi
 
-          # Recreate the reported stale-owner state entirely inside the Linux
-          # container. The next entrypoint run must repair it without losing
-          # the existing log bytes.
+          # Freeze PID 1 before recreating the reported stale-owner state
+          # inside the Linux container. Without quiescing the gateway, the
+          # deliberate permission break can itself emit an append failure
+          # before restart and create a false-negative smoke result.
+          docker kill --signal=STOP smoke >/dev/null
           docker exec --user 0:0 smoke node -e \
             "const fs=require('fs'); fs.chownSync('/tmp/openclaw',0,0); fs.chownSync('/tmp/openclaw/openclaw.log',0,0); fs.chmodSync('/tmp/openclaw',0o755); fs.chmodSync('/tmp/openclaw/openclaw.log',0o644)"
 
-          docker restart smoke >/dev/null
+          docker restart --timeout 0 smoke >/dev/null
           restarted=""
           for _ in $(seq 1 60); do
             if [ "$(docker logs smoke 2>&1 | grep -c 'dropping privileges to 1026:100 and starting gateway')" -ge 2 ]; then
