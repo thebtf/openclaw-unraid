@@ -527,17 +527,34 @@ case "$DEFAULT_AGENT_ROLES_RESULT" in
     exit 1
     ;;
 esac
-# Migration and validation commands may create the shared SQLite state after
-# the initial ownership sweep. Re-align only this small managed directory
-# before the next PUID command; persisted workspaces and session trees remain
-# outside this bounded repair.
+# Migration and validation commands may create shared SQLite state after the
+# initial ownership sweep. Ownership-only detection is insufficient: a file
+# can already belong to PUID:PGID while retaining a mode that denies its owner.
+# This tree is small and OpenClaw-managed, so enforce its complete access
+# contract before the next PUID command.
 STATE_DIR=/home/node/.openclaw/state
-if [ -d "$STATE_DIR" ] && find "$STATE_DIR" \( -not -uid "$PUID" -o -not -gid "$PGID" \) -print -quit 2>/dev/null | grep -q .; then
-  echo "[bootstrap] aligning newly created shared state ownership: $STATE_DIR"
-  chown -R "$PUID:$PGID" "$STATE_DIR" || {
-    echo "[bootstrap] FATAL: could not align newly created shared state ownership. Refusing managed writes." 1>&2
-    exit 1
-  }
+STATE_DB=$STATE_DIR/openclaw.sqlite
+if [ -L "$STATE_DIR" ] || { [ -e "$STATE_DIR" ] && [ ! -d "$STATE_DIR" ]; }; then
+  echo "[bootstrap] FATAL: $STATE_DIR must be a real directory." 1>&2
+  exit 1
+fi
+if ! mkdir -p "$STATE_DIR"; then
+  echo "[bootstrap] FATAL: could not create $STATE_DIR. Refusing managed writes." 1>&2
+  exit 1
+fi
+if [ -L "$STATE_DB" ] || { [ -e "$STATE_DB" ] && [ ! -f "$STATE_DB" ]; }; then
+  echo "[bootstrap] FATAL: $STATE_DB must be a regular file." 1>&2
+  exit 1
+fi
+if [ ! -e "$STATE_DB" ]; then
+  : > "$STATE_DB"
+fi
+echo "[bootstrap] aligning shared state access: $STATE_DIR"
+if ! chown -R "$PUID:$PGID" "$STATE_DIR" || \
+   ! find "$STATE_DIR" -type d -exec chmod 0700 {} + || \
+   ! find "$STATE_DIR" -type f -exec chmod 0600 {} +; then
+  echo "[bootstrap] FATAL: could not align shared state ownership and modes. Refusing managed writes." 1>&2
+  exit 1
 fi
 
 
