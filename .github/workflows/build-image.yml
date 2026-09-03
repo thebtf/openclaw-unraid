@@ -1810,7 +1810,14 @@ jobs:
 
           start_gateway "$compatibility_container" "$compatibility_volume"
           if ! wait_for_ready "$compatibility_container"; then
-            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: valid persisted fixture did not reach readiness; logs withheld to protect persisted values" 1>&2
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: valid persisted fixture did not reach readiness" 1>&2
+            echo "container state: $(docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} error={{json .State.Error}}' "$compatibility_container")" 1>&2
+            # Emit only fixed bootstrap markers and generic path/access errors;
+            # never print the full log because this fixture contains approval
+            # credentials and sentinel values.
+            docker logs "$compatibility_container" 2>&1 \
+              | grep -E '^\[bootstrap\] (FATAL:|.*migration:|default-agent-roles:|aligning |log target|ownership init|existing config|candidate migration|auto-applying)|^Failed to read config|^Error:' \
+              || true
             exit 1
           fi
           compatibility_log=$(docker logs "$compatibility_container" 2>&1 || true)
