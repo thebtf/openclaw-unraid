@@ -1534,7 +1534,11 @@ jobs:
 
           start_session_gateway "$session_container" "$session_volume"
           if ! wait_for_ready "$session_container"; then
-            echo "SESSION STORE UPGRADE SMOKE FAIL: migrated session fixture did not reach readiness; logs withheld to protect persisted values" 1>&2
+            echo "SESSION STORE UPGRADE SMOKE FAIL: migrated session fixture did not reach readiness" 1>&2
+            echo "container state: $(docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} error={{json .State.Error}}' "$session_container")" 1>&2
+            docker logs "$session_container" 2>&1 \
+              | grep -E '^\[bootstrap\] (exec-approvals-migration: (applied|no-op|refused code=[a-z0-9-]+)|default-agent-roles: (applied|already-materialized|refused code=[a-z0-9-]+)|aligning shared state access: /home/node/\.openclaw/state|workspace-migration: (no-op|applied|refused)|session-migration: (no-op|applied targets=[0-9]+ entries=[0-9]+ events=[0-9]+|failed code=[a-z0-9-]+ status=[a-z0-9-]+|refused)|applying managed gateway/logging keys|dropping privileges to [0-9]+:[0-9]+ and starting gateway|FATAL: (exec approvals migration refused; legacy approval state was left for recovery\. Refusing managed writes\.|default-agent role materialization refused\. Refusing managed writes\.|OpenClaw config failed native validation before workspace migration\. Refusing managed writes\.|workspace migration refused; legacy workspace sources were left for manual recovery\. Refusing managed writes\.|session migration refused; legacy session sources were left for manual recovery\. Refusing managed writes\.))$|^Failed to read config at /home/node/\.openclaw/openclaw\.json: (EACCES: permission denied, stat .*/state/openclaw\.sqlite|unable to open database file)$' \
+              || true
             exit 1
           fi
           session_log=$(docker logs "$session_container" 2>&1 || true)
