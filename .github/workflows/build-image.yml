@@ -1810,7 +1810,14 @@ jobs:
 
           start_gateway "$compatibility_container" "$compatibility_volume"
           if ! wait_for_ready "$compatibility_container"; then
-            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: valid persisted fixture did not reach readiness; logs withheld to protect persisted values" 1>&2
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: valid persisted fixture did not reach readiness" 1>&2
+            echo "container state: $(docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} error={{json .State.Error}}' "$compatibility_container")" 1>&2
+            # Emit only fixed bootstrap markers and generic path/access errors;
+            # never print the full log because this fixture contains approval
+            # credentials and sentinel values.
+            docker logs "$compatibility_container" 2>&1 \
+              | grep -E '^\[bootstrap\] (exec-approvals-migration: (applied|no-op|refused code=[a-z0-9-]+)|default-agent-roles: (applied|already-materialized|refused code=[a-z0-9-]+)|aligning shared state access: /home/node/\.openclaw/state|workspace-migration: (no-op|applied|refused)|session-migration: (no-op|applied targets=[0-9]+ entries=[0-9]+ events=[0-9]+|refused)|applying managed gateway/logging keys|dropping privileges to [0-9]+:[0-9]+ and starting gateway|FATAL: (exec approvals migration refused; legacy approval state was left for recovery\. Refusing managed writes\.|default-agent role materialization refused\. Refusing managed writes\.|OpenClaw config failed native validation before workspace migration\. Refusing managed writes\.|workspace migration refused; legacy workspace sources were left for manual recovery\. Refusing managed writes\.))$|^Failed to read config at /home/node/\.openclaw/openclaw\.json: (EACCES: permission denied, stat .*/state/openclaw\.sqlite|unable to open database file)$' \
+              || true
             exit 1
           fi
           compatibility_log=$(docker logs "$compatibility_container" 2>&1 || true)
