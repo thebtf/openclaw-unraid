@@ -25,6 +25,11 @@ on:
       - scripts/build-openclaw-workspace-migration-adapter.mjs
       - scripts/migrate-openclaw-legacy-workspaces.mjs
       - scripts/migrate-openclaw-legacy-sessions.mjs
+      - scripts/build-openclaw-exec-approvals-migration-adapter.mjs
+      - scripts/migrate-openclaw-exec-approvals.mjs
+      - scripts/build-openclaw-default-agent-roles-adapter.mjs
+      - scripts/materialize-legacy-default-agent-roles.mjs
+      - scripts/fixtures/legacy-default-agent-roles.json
       - .github/workflows/build-image.yml
   schedule:
     - cron: "23 5 * * *" # daily, off the :00 herd
@@ -1640,6 +1645,296 @@ jobs:
             if (fs.existsSync(path.join(configDir, "session-sqlite-migration-runs"))) fail("malformed source created an upstream migration manifest");
           '
           echo "PERSISTED SESSION-STORE UPGRADE SMOKE OK"
+
+      # PERSISTED EXEC-APPROVALS + DEFAULT-ROLE GATE: seed the retired JSON
+      # beside a field-shaped multi-agent config, then prove the exact
+      # image-pinned migrations converge without exposing persisted values.
+      - name: Persisted exec approvals and default-role smoke
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          set -eu
+          compatibility_container=smoke-exec-approvals-default-roles
+          compatibility_restart_container=smoke-exec-approvals-default-roles-restart
+          refusal_container=smoke-exec-approvals-default-roles-refused
+          dry_run_container=smoke-exec-approvals-dry-run
+          compatibility_volume=smoke-exec-approvals-default-roles-config
+          refusal_volume=smoke-exec-approvals-default-roles-refusal-config
+          dry_run_volume=smoke-exec-approvals-dry-run-config
+          fixture_dir=""
+          approval_secret='exec-approvals-source-secret-c7be65'
+          malformed_secret='malformed-exec-approvals-secret-171'
+          role_secret='default-role-smoke-secret-3c15cf'
+
+          cleanup() {
+            docker rm -f "$compatibility_container" "$compatibility_restart_container" "$refusal_container" "$dry_run_container" >/dev/null 2>&1 || true
+            [ -z "$fixture_dir" ] || rm -rf "$fixture_dir"
+            docker volume rm -f "$compatibility_volume" "$refusal_volume" "$dry_run_volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          gateway_ready() {
+            docker exec "$1" node -e 'fetch("http://127.0.0.1:18789/readyz", { signal: AbortSignal.timeout(2000) }).then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))'
+          }
+          wait_for_ready() {
+            for _ in $(seq 1 24); do
+              [ "$(docker inspect -f '{{.State.Running}}' "$1")" = "true" ] || return 1
+              gateway_ready "$1" && return 0
+              sleep 5
+            done
+            return 1
+          }
+          wait_for_exit() {
+            for _ in $(seq 1 24); do
+              [ "$(docker inspect -f '{{.State.Running}}' "$1")" != "true" ] && return 0
+              sleep 5
+            done
+            return 1
+          }
+          start_gateway() {
+            container=$1
+            volume=$2
+            docker run -d --name "$container" \
+              -v "$volume:/home/node/.openclaw" \
+              -e PUID=1000 -e PGID=1000 \
+              -e OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 \
+              -e OPENCLAW_GATEWAY_TOKEN=exec-approvals-role-smoke-token \
+              -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
+              -e CUSTOM_LLM_BASE_URL=http://127.0.0.1:9/v1 \
+              -e CUSTOM_LLM_API_KEY=exec-approvals-role-smoke \
+              -e CUSTOM_LLM_API_TYPE=openai-completions \
+              -e CUSTOM_LLM_MODEL_ID=exec-approvals-role-smoke-model \
+              "$DERIVED_IMAGE:smoke"
+          }
+
+          fixture_dir=$(mktemp -d)
+          cp scripts/fixtures/legacy-default-agent-roles.json "$fixture_dir/openclaw.json"
+          cat > "$fixture_dir/exec-approvals.json" <<'JSON'
+          {"version":1,"socket":{"path":"/tmp/openclaw-exec-approvals.sock","token":"exec-approvals-source-secret-c7be65"},"defaults":{},"agents":{}}
+          JSON
+          printf '%s\n' '{"version":1,"socket":{"token":"malformed-exec-approvals-secret-171"}' > "$fixture_dir/malformed-exec-approvals.json"
+
+          docker volume create "$compatibility_volume" >/dev/null
+          docker volume create "$refusal_volume" >/dev/null
+          docker volume create "$dry_run_volume" >/dev/null
+          docker run --rm --entrypoint /bin/sh \
+            -v "$compatibility_volume:/home/node/.openclaw" \
+            -v "$fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -ceu '
+              mkdir -p /home/node/.openclaw
+              cp /fixtures/openclaw.json /home/node/.openclaw/openclaw.json
+              cp /fixtures/exec-approvals.json /home/node/.openclaw/exec-approvals.json
+              chown -R 1000:1000 /home/node/.openclaw
+            '
+          docker run --rm --entrypoint /bin/sh \
+            -v "$dry_run_volume:/home/node/.openclaw" \
+            -v "$fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -ceu '
+              mkdir -p /home/node/.openclaw
+              cp /fixtures/openclaw.json /home/node/.openclaw/openclaw.json
+              cp /fixtures/exec-approvals.json /home/node/.openclaw/exec-approvals.json
+              chown -R 1000:1000 /home/node/.openclaw
+            '
+          docker run -d --name "$dry_run_container" \
+            -v "$dry_run_volume:/home/node/.openclaw" \
+            -e PUID=1000 -e PGID=1000 \
+            -e OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 \
+            -e OPENCLAW_GATEWAY_TOKEN=exec-approvals-dry-run-token \
+            -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
+            -e OPENCLAW_CONFIG_MIGRATION=dry-run \
+            "$DERIVED_IMAGE:smoke"
+          if ! wait_for_exit "$dry_run_container"; then
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: config dry-run did not stop before startup" 1>&2
+            exit 1
+          fi
+          dry_run_log=$(docker logs "$dry_run_container" 2>&1 || true)
+          if [ "$(printf '%s\n' "$dry_run_log" | grep -Fxc '[bootstrap] exec-approvals-migration: skipped (config dry-run)' || true)" != "1" ]; then
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: config dry-run did not skip approvals migration exactly once" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$dry_run_log" | grep -Fq "$approval_secret"; then
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: config dry-run log disclosed approvals state" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint node \
+            -v "$dry_run_volume:/home/node/.openclaw:ro" \
+            -v "$fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const fail = (message) => { console.error(`EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: ${message}`); process.exit(1); };
+            const configDir = "/home/node/.openclaw";
+            const source = path.join(configDir, "exec-approvals.json");
+            if (!fs.readFileSync(source).equals(fs.readFileSync("/fixtures/exec-approvals.json"))) fail("config dry-run changed approvals source bytes");
+            if (!fs.readFileSync(path.join(configDir, "openclaw.json")).equals(fs.readFileSync("/fixtures/openclaw.json"))) fail("config dry-run changed config bytes");
+            if (fs.existsSync(`${source}.openclaw-2026.8.2-pre-migration.bak`) || fs.existsSync(`${source}.doctor-importing`) || fs.existsSync(path.join(configDir, "state", "openclaw.sqlite"))) fail("config dry-run created approvals backup, claim, or SQLite state");
+          '
+
+
+          start_gateway "$compatibility_container" "$compatibility_volume"
+          if ! wait_for_ready "$compatibility_container"; then
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: valid persisted fixture did not reach readiness; logs withheld to protect persisted values" 1>&2
+            exit 1
+          fi
+          compatibility_log=$(docker logs "$compatibility_container" 2>&1 || true)
+          if [ "$(printf '%s\n' "$compatibility_log" | grep -Fxc '[bootstrap] exec-approvals-migration: applied' || true)" != "1" ]; then
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: valid fixture did not emit exactly one exec approvals applied marker" 1>&2
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$compatibility_log" | grep -Fxc '[bootstrap] default-agent-roles: applied' || true)" != "1" ]; then
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: field roster did not emit exactly one default-role applied marker" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$compatibility_log" | grep -Fq "$approval_secret" || printf '%s\n' "$compatibility_log" | grep -Fq "$role_secret" || printf '%s\n' "$compatibility_log" | grep -Fq '"changes"'; then
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: valid migration log disclosed a fixture value or raw migration report" 1>&2
+            exit 1
+          fi
+
+          docker run --rm --entrypoint node \
+            -v "$compatibility_volume:/home/node/.openclaw:ro" \
+            -v "$fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const crypto = require("node:crypto");
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const { DatabaseSync } = require("node:sqlite");
+            const { isDeepStrictEqual } = require("node:util");
+            const fail = (message) => { console.error(`EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: ${message}`); process.exit(1); };
+            const configDir = "/home/node/.openclaw";
+            const source = path.join(configDir, "exec-approvals.json");
+            const backup = `${source}.openclaw-2026.8.2-pre-migration.bak`;
+            const fixture = fs.readFileSync("/fixtures/exec-approvals.json");
+            const roleFixture = JSON.parse(fs.readFileSync("/fixtures/openclaw.json", "utf8"));
+            const config = JSON.parse(fs.readFileSync(path.join(configDir, "openclaw.json"), "utf8"));
+            if (fs.existsSync(source) || fs.existsSync(`${source}.doctor-importing`)) fail("retired exec approvals source or claim remains");
+            const backupStat = fs.lstatSync(backup);
+            if (!backupStat.isFile() || backupStat.nlink !== 1 || backupStat.uid !== 1000 || backupStat.gid !== 1000 || (backupStat.mode & 0o077) !== 0) fail("exec approvals backup is not private and PUID-owned");
+            if (!fs.readFileSync(backup).equals(fixture)) fail("exec approvals backup is not byte-identical");
+            if (!isDeepStrictEqual(config.bindings?.slice(0, roleFixture.bindings.length), roleFixture.bindings)) fail("named Telegram bindings were not preserved exactly");
+            const telegramWildcards = (config.bindings ?? []).filter((binding) => binding?.agentId === "main" && binding?.match?.channel === "telegram" && binding?.match?.accountId === "*");
+            if (telegramWildcards.length !== 1) fail("main Telegram channel-wide binding was not materialized exactly once");
+            if (config.agents?.entries?.main?.workspace !== path.join(configDir, "workspace")) fail("main workspace role was not materialized");
+            for (const key of ["heartbeat", "systemAgent"]) {
+              if (config.agents?.defaults?.[key]?.agentId !== "main") fail(`default role ${key} was not materialized for main`);
+            }
+            if (config.agents?.defaults?.authInheritance !== undefined && config.agents.defaults.authInheritance?.agentId !== "main") fail("existing auth inheritance target was not preserved for main");
+            if (config.talk?.agentId !== "main") fail("talk target was not materialized for main");
+            const dbPath = path.join(configDir, "state", "openclaw.sqlite");
+            const dbStat = fs.lstatSync(dbPath);
+            if (!dbStat.isFile() || dbStat.uid !== 1000 || dbStat.gid !== 1000) fail("exec approvals SQLite state is not PUID-owned");
+            const db = new DatabaseSync(dbPath, { readOnly: true });
+            try {
+              const row = db.prepare("SELECT raw_json, socket_path, has_socket_token FROM exec_approvals_config WHERE config_key = ?").get("current");
+              if (!row || row.socket_path !== "/tmp/openclaw-exec-approvals.sock" || Number(row.has_socket_token) !== 1) fail("canonical exec approvals row is missing or incomplete");
+              const imported = JSON.parse(row.raw_json);
+              if (imported.version !== 1 || imported.socket?.token !== "exec-approvals-source-secret-c7be65") fail("canonical exec approvals row does not match the legacy source");
+              const receipts = db.prepare("SELECT source_path, source_sha256, source_record_count, removed_source, report_json FROM migration_sources WHERE migration_kind = ? AND target_table = ?").all("legacy-exec-approvals-json", "exec_approvals_config");
+              if (receipts.length !== 1) fail("SQLite does not contain exactly one exec approvals migration receipt");
+              const receipt = receipts[0];
+              if (receipt.source_path !== source || receipt.source_sha256 !== crypto.createHash("sha256").update(fixture).digest("hex") || Number(receipt.source_record_count) !== 1 || Number(receipt.removed_source) !== 1) fail("exec approvals receipt is not authoritative");
+              const report = JSON.parse(receipt.report_json);
+              if (report.decision !== "legacy-imported" || report.sourceValid !== true || report.importedRecordCount !== 1 || report.removesSource !== true) fail("exec approvals receipt report is not an authoritative import");
+            } finally {
+              db.close();
+            }
+          '
+
+          docker stop -t 15 "$compatibility_container" >/dev/null
+          docker rm "$compatibility_container" >/dev/null
+          start_gateway "$compatibility_restart_container" "$compatibility_volume"
+          if ! wait_for_ready "$compatibility_restart_container"; then
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: migrated fixture restart did not reach readiness; logs withheld to protect persisted values" 1>&2
+            exit 1
+          fi
+          restart_log=$(docker logs "$compatibility_restart_container" 2>&1 || true)
+          if [ "$(printf '%s\n' "$restart_log" | grep -Fxc '[bootstrap] exec-approvals-migration: no-op' || true)" != "1" ] || [ "$(printf '%s\n' "$restart_log" | grep -Fxc '[bootstrap] default-agent-roles: already-materialized' || true)" != "1" ]; then
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: restart did not converge to both bounded no-op statuses" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$restart_log" | grep -Fq "$approval_secret" || printf '%s\n' "$restart_log" | grep -Fq "$role_secret" || printf '%s\n' "$restart_log" | grep -Fq '"changes"'; then
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: restart log disclosed a fixture value or raw migration report" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint node \
+            -v "$compatibility_volume:/home/node/.openclaw:ro" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const { DatabaseSync } = require("node:sqlite");
+            const fail = (message) => { console.error(`EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: ${message}`); process.exit(1); };
+            const configDir = "/home/node/.openclaw";
+            const source = path.join(configDir, "exec-approvals.json");
+            const backups = fs.readdirSync(configDir).filter((name) => name === "exec-approvals.json.openclaw-2026.8.2-pre-migration.bak");
+            if (backups.length !== 1 || fs.existsSync(source) || fs.existsSync(`${source}.doctor-importing`)) fail("restart changed the retired exec approvals source or backup set");
+            const config = JSON.parse(fs.readFileSync(path.join(configDir, "openclaw.json"), "utf8"));
+            const telegramWildcards = (config.bindings ?? []).filter((binding) => binding?.agentId === "main" && binding?.match?.channel === "telegram" && binding?.match?.accountId === "*");
+            if (telegramWildcards.length !== 1) fail("restart duplicated the main Telegram wildcard");
+            const db = new DatabaseSync(path.join(configDir, "state", "openclaw.sqlite"), { readOnly: true });
+            try {
+              const rowCount = db.prepare("SELECT COUNT(*) AS count FROM exec_approvals_config WHERE config_key = ?").get("current").count;
+              const receiptCount = db.prepare("SELECT COUNT(*) AS count FROM migration_sources WHERE migration_kind = ? AND target_table = ?").get("legacy-exec-approvals-json", "exec_approvals_config").count;
+              if (Number(rowCount) !== 1 || Number(receiptCount) !== 1) fail("restart duplicated exec approvals canonical state or receipt");
+            } finally {
+              db.close();
+            }
+          '
+
+          docker run --rm --entrypoint /bin/sh \
+            -v "$refusal_volume:/home/node/.openclaw" \
+            -v "$fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -ceu '
+              mkdir -p /home/node/.openclaw
+              cp /fixtures/malformed-exec-approvals.json /home/node/.openclaw/exec-approvals.json
+              chown -R 1000:1000 /home/node/.openclaw
+            '
+          start_gateway "$refusal_container" "$refusal_volume"
+          if ! wait_for_exit "$refusal_container"; then
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: malformed approvals source did not refuse before gateway startup; logs withheld to protect persisted values" 1>&2
+            exit 1
+          fi
+          refusal_exit_code=$(docker inspect -f '{{.State.ExitCode}}' "$refusal_container")
+          refusal_log=$(docker logs "$refusal_container" 2>&1 || true)
+          if [ "$refusal_exit_code" = "0" ]; then
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: malformed approvals source exited successfully" 1>&2
+            exit 1
+          fi
+          if [ "$(printf '%s\n' "$refusal_log" | grep -Ec '^\[bootstrap\] exec-approvals-migration: refused code=[a-z0-9-]+$' || true)" != "1" ]; then
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: malformed approvals source omitted its bounded refusal" 1>&2
+            exit 1
+          fi
+          if printf '%s\n' "$refusal_log" | grep -Fq "$malformed_secret" || printf '%s\n' "$refusal_log" | grep -Fq '"changes"'; then
+            echo "EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: malformed approvals log disclosed a fixture value or raw migration report" 1>&2
+            exit 1
+          fi
+          docker run --rm --entrypoint node \
+            -v "$refusal_volume:/home/node/.openclaw" \
+            -v "$fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -e '
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const { DatabaseSync } = require("node:sqlite");
+            const fail = (message) => { console.error(`EXEC APPROVALS/DEFAULT-ROLE SMOKE FAIL: ${message}`); process.exit(1); };
+            const configDir = "/home/node/.openclaw";
+            const source = path.join(configDir, "exec-approvals.json");
+            const backup = `${source}.openclaw-2026.8.2-pre-migration.bak`;
+            if (fs.existsSync(path.join(configDir, "openclaw.json"))) fail("malformed approvals source reached config creation");
+            if (!fs.readFileSync(source).equals(fs.readFileSync("/fixtures/malformed-exec-approvals.json"))) fail("malformed approvals source bytes changed");
+            if (fs.existsSync(`${source}.doctor-importing`)) fail("malformed approvals source left an upstream claim");
+            if (!fs.existsSync(backup)) fail("malformed approvals source did not create a private backup");
+            const backupStat = fs.lstatSync(backup);
+            if (!backupStat.isFile() || backupStat.nlink !== 1 || backupStat.uid !== 1000 || backupStat.gid !== 1000 || (backupStat.mode & 0o077) !== 0) fail("malformed approvals backup is not private and PUID-owned");
+            if (!fs.readFileSync(backup).equals(fs.readFileSync("/fixtures/malformed-exec-approvals.json"))) fail("malformed approvals backup is not byte-identical");
+            const dbPath = path.join(configDir, "state", "openclaw.sqlite");
+            if (fs.existsSync(dbPath)) {
+              const db = new DatabaseSync(dbPath, { readOnly: true });
+              try {
+                const tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = ? AND name = ?").all("table", "exec_approvals_config").map((row) => row.name));
+                if (tables.has("exec_approvals_config") && Number(db.prepare("SELECT COUNT(*) AS count FROM exec_approvals_config").get().count) !== 0) fail("malformed approvals source created a canonical row");
+              } finally {
+                db.close();
+              }
+            }
+          '
+          echo "PERSISTED EXEC APPROVALS AND DEFAULT-ROLE SMOKE OK"
 
       # Push happens only after the smoke gate passed (cache hit — instant).
       - name: Push
