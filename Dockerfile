@@ -38,17 +38,23 @@ USER root
 COPY docker/unraid-entrypoint.sh /usr/local/bin/unraid-entrypoint.sh
 COPY scripts/migrate-openclaw-2-config.py /usr/local/bin/migrate-openclaw-2-config.py
 COPY scripts/build-openclaw-workspace-migration-adapter.mjs /usr/local/lib/build-openclaw-workspace-migration-adapter.mjs
+COPY scripts/build-openclaw-exec-approvals-migration-adapter.mjs /usr/local/lib/build-openclaw-exec-approvals-migration-adapter.mjs
+COPY scripts/build-openclaw-default-agent-roles-adapter.mjs /usr/local/lib/build-openclaw-default-agent-roles-adapter.mjs
 COPY scripts/migrate-openclaw-legacy-workspaces.mjs /usr/local/bin/migrate-openclaw-legacy-workspaces.mjs
+COPY scripts/migrate-openclaw-exec-approvals.mjs /usr/local/bin/migrate-openclaw-exec-approvals.mjs
+COPY scripts/materialize-legacy-default-agent-roles.mjs /usr/local/bin/materialize-legacy-default-agent-roles.mjs
 COPY scripts/migrate-openclaw-legacy-sessions.mjs /usr/local/bin/migrate-openclaw-legacy-sessions.mjs
 RUN node /usr/local/lib/build-openclaw-workspace-migration-adapter.mjs /app/dist /usr/local/lib/openclaw-unraid-workspace-migration.json && \
-  chmod 755 /usr/local/bin/unraid-entrypoint.sh /usr/local/bin/migrate-openclaw-2-config.py /usr/local/bin/migrate-openclaw-legacy-workspaces.mjs /usr/local/bin/migrate-openclaw-legacy-sessions.mjs
+  node /usr/local/lib/build-openclaw-exec-approvals-migration-adapter.mjs /app/dist /usr/local/lib/openclaw-unraid-exec-approvals-migration.json && \
+  node /usr/local/lib/build-openclaw-default-agent-roles-adapter.mjs /app/dist /usr/local/lib/openclaw-unraid-default-agent-roles.json && \
+  chmod 755 /usr/local/bin/unraid-entrypoint.sh /usr/local/bin/migrate-openclaw-2-config.py /usr/local/bin/migrate-openclaw-legacy-workspaces.mjs /usr/local/bin/migrate-openclaw-exec-approvals.mjs /usr/local/bin/materialize-legacy-default-agent-roles.mjs /usr/local/bin/migrate-openclaw-legacy-sessions.mjs
 
 # mcporter: MCP-client CLI consumed by the bundled `mcporter` skill
 # (/app/skills/mcporter requires the `mcporter` bin). Baked into the image so
 # per-agent MCP servers (config/mcporter.json in each workspace) survive
 # container recreation — a runtime `npm i -g` lands in the overlay and is lost
 # on every image update.
-RUN npm install -g mcporter && mcporter --version
+RUN npm install -g mcporter && mcporter --version && rm -rf /home/node/.npm
 
 # Keep upstream tini as PID 1; our script replaces only the CMD layer.
 ENTRYPOINT ["tini", "-s", "--", "/usr/local/bin/unraid-entrypoint.sh"]

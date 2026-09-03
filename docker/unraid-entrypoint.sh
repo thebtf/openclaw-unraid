@@ -255,6 +255,54 @@ csv_to_model_objects() {
 
 ORIGINS_JSON=$(csv_to_json_strings "$OPENCLAW_ALLOWED_ORIGINS")
 
+# Run OpenClaw CLI helpers as PUID (not root): config/state paths resolve via
+# the same HOME the gateway uses and every migration artifact stays PUID-owned.
+run_as_puid_with_home() {
+  home=$1
+  shift
+  setpriv --reuid="$PUID" --regid="$PGID" --init-groups \
+    env HOME="$home" OPENCLAW_HOME="$home" OPENCLAW_STATE_DIR="$home/.openclaw" \
+    OPENCLAW_CONFIG_PATH="$home/.openclaw/openclaw.json" OPENCLAW_CONFIG_DIR="$home/.openclaw" \
+    OPENCLAW_WORKSPACE_DIR="$home/.openclaw/workspace" PATH="$PATH" "$@"
+}
+
+run_as_puid() {
+  run_as_puid_with_home /home/node "$@"
+}
+
+# --- EXEC APPROVALS LEGACY STATE (PUID, before every config write) ---
+# The exact image-pinned upstream importer owns SQLite, receipts, exclusive
+# claims, and source retirement. This boundary creates a private verified
+# backup first and never prints approval data or raw upstream reports.
+# Config dry-run is globally inspection-only, so it must not invoke this
+# state-writing migration before the later config planning/refusal path.
+if [ "$CONFIG_MIGRATION_MODE" = "dry-run" ]; then
+  echo "[bootstrap] exec-approvals-migration: skipped (config dry-run)"
+else
+  if ! EXEC_APPROVALS_MIGRATION_RESULT=$(run_as_puid node /usr/local/bin/migrate-openclaw-exec-approvals.mjs); then
+    case "$EXEC_APPROVALS_MIGRATION_RESULT" in
+      'exec-approvals-migration: refused code='[a-z0-9-]*)
+        echo "[bootstrap] $EXEC_APPROVALS_MIGRATION_RESULT" 1>&2
+        ;;
+      *)
+        echo "[bootstrap] exec-approvals-migration: refused code=entrypoint-status" 1>&2
+        ;;
+    esac
+    echo "[bootstrap] FATAL: exec approvals migration refused; legacy approval state was left for recovery. Refusing managed writes." 1>&2
+    exit 1
+  fi
+  case "$EXEC_APPROVALS_MIGRATION_RESULT" in
+    'exec-approvals-migration: no-op'|'exec-approvals-migration: applied')
+      echo "[bootstrap] $EXEC_APPROVALS_MIGRATION_RESULT"
+      ;;
+    *)
+      echo "[bootstrap] exec-approvals-migration: refused code=entrypoint-status" 1>&2
+      echo "[bootstrap] FATAL: exec approvals migration returned an invalid status. Refusing managed writes." 1>&2
+      exit 1
+      ;;
+  esac
+fi
+
 # --- Ensure config file exists; openclaw config set requires it ---
 CONFIG_EXISTED=0
 if [ -L "$CFG" ] || [ -s "$CFG" ]; then
@@ -268,23 +316,6 @@ else
   chown "$PUID:$PGID" "$CFG" 2>/dev/null || true
   echo "[bootstrap] created empty $CFG"
 fi
-
-# Run openclaw CLI as PUID (not root): config path resolves via HOME, the
-# rewritten openclaw.json keeps PUID ownership (no re-chown dance), and
-# plugin-discovery ownership checks evaluate against the same uid the
-# gateway will run as.
-run_as_puid_with_home() {
-  home=$1
-  shift
-  setpriv --reuid="$PUID" --regid="$PGID" --init-groups \
-    env HOME="$home" OPENCLAW_HOME="$home" OPENCLAW_STATE_DIR="$home/.openclaw" \
-    OPENCLAW_CONFIG_PATH="$home/.openclaw/openclaw.json" OPENCLAW_CONFIG_DIR="$home/.openclaw" \
-    OPENCLAW_WORKSPACE_DIR="$home/.openclaw/workspace" PATH="$PATH" "$@"
-}
-
-run_as_puid() {
-  run_as_puid_with_home /home/node "$@"
-}
 
 CONFIG_RECOVERY_ATTEMPTED=0
 MIGRATION_BACKUP_PATH=
@@ -444,6 +475,34 @@ if [ "$CONFIG_MIGRATION_MODE" = "dry-run" ]; then
   echo "[bootstrap] FATAL: existing OpenClaw config needs no migration; workspace migration was not run because OPENCLAW_CONFIG_MIGRATION=dry-run is inspection-only. Refusing managed writes." 1>&2
   exit 1
 fi
+
+# --- LEGACY DEFAULT-AGENT ROLES (PUID, upstream materializer only) ---
+# A multi-agent field roster that lost its implicit main owner is repaired by
+# the exact image-pinned materializer before workspace/session or managed-key
+# writes. The helper validates a private candidate through native config
+# validation before atomically publishing it.
+if ! DEFAULT_AGENT_ROLES_RESULT=$(run_as_puid node /usr/local/bin/materialize-legacy-default-agent-roles.mjs); then
+  case "$DEFAULT_AGENT_ROLES_RESULT" in
+    'default-agent-roles: refused code='[a-z0-9-]*)
+      echo "[bootstrap] $DEFAULT_AGENT_ROLES_RESULT" 1>&2
+      ;;
+    *)
+      echo "[bootstrap] default-agent-roles: refused code=entrypoint-status" 1>&2
+      ;;
+  esac
+  echo "[bootstrap] FATAL: default-agent role materialization refused. Refusing managed writes." 1>&2
+  exit 1
+fi
+case "$DEFAULT_AGENT_ROLES_RESULT" in
+  'default-agent-roles: applied'|'default-agent-roles: already-materialized')
+    echo "[bootstrap] $DEFAULT_AGENT_ROLES_RESULT"
+    ;;
+  *)
+    echo "[bootstrap] default-agent-roles: refused code=entrypoint-status" 1>&2
+    echo "[bootstrap] FATAL: default-agent role materialization returned an invalid status. Refusing managed writes." 1>&2
+    exit 1
+    ;;
+esac
 
 # --- WORKSPACE LEGACY STATE (PUID, upstream importer only) ---
 # Use the real config only after the exact config migration path has completed.
