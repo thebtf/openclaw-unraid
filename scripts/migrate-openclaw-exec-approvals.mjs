@@ -490,6 +490,8 @@ function assertMigrationResult(result) {
   !Array.isArray(result.changes) ||
   !Array.isArray(result.warnings) ||
   !Array.isArray(result.notices) ||
+  result.changes.length === 0 ||
+  result.notices.length === 0 ||
   result.warnings.length !== 0 ||
   !result.changes.every((change) => typeof change === "string" && SUCCESS_CHANGES.has(change)) ||
   !result.notices.every((notice) => notice === SUCCESS_NOTICE)
