@@ -1816,7 +1816,7 @@ jobs:
             # never print the full log because this fixture contains approval
             # credentials and sentinel values.
             docker logs "$compatibility_container" 2>&1 \
-              | grep -E '^\[bootstrap\] (FATAL:|.*migration:|default-agent-roles:|aligning |log target|ownership init|existing config|candidate migration|auto-applying)|^Failed to read config|^Error:' \
+              | grep -E '^\[bootstrap\] (FATAL:|.*migration:|default-agent-roles:|aligning |log target|ownership init|existing config|candidate migration|auto-applying)|^Failed to read config at /home/node/\.openclaw/openclaw\.json: (EACCES: permission denied, stat|unable to open database file)' \
               || true
             exit 1
           fi
