@@ -1919,6 +1919,7 @@ jobs:
             if (fs.existsSync(path.join(configDir, "openclaw.json"))) fail("malformed approvals source reached config creation");
             if (!fs.readFileSync(source).equals(fs.readFileSync("/fixtures/malformed-exec-approvals.json"))) fail("malformed approvals source bytes changed");
             if (fs.existsSync(`${source}.doctor-importing`)) fail("malformed approvals source left an upstream claim");
+            if (!fs.existsSync(backup)) fail("malformed approvals source did not create a private backup");
             const backupStat = fs.lstatSync(backup);
             if (!backupStat.isFile() || backupStat.nlink !== 1 || backupStat.uid !== 1000 || backupStat.gid !== 1000 || (backupStat.mode & 0o077) !== 0) fail("malformed approvals backup is not private and PUID-owned");
             if (!fs.readFileSync(backup).equals(fs.readFileSync("/fixtures/malformed-exec-approvals.json"))) fail("malformed approvals backup is not byte-identical");

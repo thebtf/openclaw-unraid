@@ -247,7 +247,7 @@ function classifyLegacyRoster(config) {
   return { applicable: false };
  }
  if (!ids.includes("main")) {
-  refuse("roster");
+  return { applicable: false };
  }
  for (const id of ids) {
   if (!isAgentId(id) || !isRecord(entries[id])) {
