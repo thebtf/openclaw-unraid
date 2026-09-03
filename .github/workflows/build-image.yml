@@ -130,8 +130,13 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         run: |
           set -eu
+          cleanup() {
+            docker rm -f smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
           docker run -d --name smoke \
-            -e PUID=1234 -e PGID=1000 \
+            -e PUID=1026 -e PGID=100 \
             -e OPENCLAW_GATEWAY_TOKEN=smoke-token \
             -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
             -e CUSTOM_LLM_BASE_URL=http://127.0.0.1:9/v1 \
@@ -146,7 +151,7 @@ jobs:
           # PUID before the CLI seed starts; keep this dedicated remap gate bounded at 5 minutes.
           ok=""
           for _ in $(seq 1 60); do
-            if docker logs smoke 2>&1 | grep -q "dropping privileges to 1234:1000 and starting gateway"; then
+            if docker logs smoke 2>&1 | grep -q "dropping privileges to 1026:100 and starting gateway"; then
               ok=1; break
             fi
             if [ "$(docker inspect -f '{{.State.Running}}' smoke)" != "true" ]; then
@@ -158,21 +163,45 @@ jobs:
           docker logs smoke 2>&1 | tail -60
           if [ -z "$ok" ]; then
             echo "SMOKE FAIL: bootstrap never reached the gateway phase" 1>&2
-            docker rm -f smoke >/dev/null 2>&1 || true
             exit 1
           fi
           sleep 10
           if [ "$(docker inspect -f '{{.State.Running}}' smoke)" != "true" ]; then
             echo "SMOKE FAIL: container died right after reaching gateway phase" 1>&2
             docker logs smoke 2>&1 | tail -40
-            docker rm -f smoke >/dev/null 2>&1 || true
+            exit 1
+          fi
+          # The gateway runs as the real Unraid UID:GID and must be able to
+          # append to its own log target. Ownership and restrictive modes
+          # are re-established on every start, not only on first boot.
+          test "$(docker exec smoke stat -c '%u:%g %a' /tmp/openclaw)" = "1026:100 700"
+          test "$(docker exec smoke stat -c '%u:%g %a' /tmp/openclaw/openclaw.log)" = "1026:100 600"
+          docker exec --user 1026:100 smoke sh -ceu 'printf "uid-1026-write\n" >> /tmp/openclaw/openclaw.log'
+          docker exec smoke grep -q '^uid-1026-write$' /tmp/openclaw/openclaw.log
+          if docker logs smoke 2>&1 | grep -q "log file append failed"; then
+            echo "SMOKE FAIL: gateway could not append to its log" 1>&2
+            exit 1
+          fi
+
+          docker restart smoke >/dev/null
+          restarted=""
+          for _ in $(seq 1 60); do
+            if [ "$(docker logs smoke 2>&1 | grep -c 'dropping privileges to 1026:100 and starting gateway')" -ge 2 ]; then
+              restarted=1; break
+            fi
+            sleep 5
+          done
+          [ -n "$restarted" ] || { echo "SMOKE FAIL: repeated bootstrap did not reach gateway" 1>&2; exit 1; }
+          test "$(docker exec smoke stat -c '%u:%g %a' /tmp/openclaw)" = "1026:100 700"
+          test "$(docker exec smoke stat -c '%u:%g %a' /tmp/openclaw/openclaw.log)" = "1026:100 600"
+          if docker logs smoke 2>&1 | grep -q "log file append failed"; then
+            echo "SMOKE FAIL: repeated start reported log append failure" 1>&2
             exit 1
           fi
           # First-boot seed marker must exist (CUSTOM_LLM_* was set).
           docker exec smoke sh -c 'test -f /home/node/.openclaw/.unraid-template-seeded' \
-            || { echo "SMOKE FAIL: seed marker missing" 1>&2; docker rm -f smoke >/dev/null 2>&1; exit 1; }
+            || { echo "SMOKE FAIL: seed marker missing" 1>&2; exit 1; }
           echo "SMOKE OK"
-          docker rm -f smoke >/dev/null
 
       # PERSISTED-CONFIG UPGRADE GATE: a persisted legacy `check` setting must
       # promote to auto and reach readiness; explicit `dry-run` must leave the

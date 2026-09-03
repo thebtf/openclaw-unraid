@@ -166,6 +166,30 @@ if [ "${OPENCLAW_SKIP_OWNERSHIP_INIT:-0}" != "1" ]; then
 else
   echo "[bootstrap] OPENCLAW_SKIP_OWNERSHIP_INIT=1, skipping ownership init"
 fi
+# --- Log target contract (every start) ---
+# `/tmp/openclaw` can be bind-mounted or can retain a stale file whose owner
+# differs from the directory. Repair both explicitly before any PUID CLI or
+# gateway process can open the configured log. Never replace a non-regular
+# path: that is an unsafe mount/configuration error, not an ownership issue.
+LOG_DIR=/tmp/openclaw
+LOG_FILE=$LOG_DIR/openclaw.log
+if [ -L "$LOG_DIR" ] || [ ! -d "$LOG_DIR" ]; then
+  echo "[bootstrap] FATAL: $LOG_DIR must be a real directory." 1>&2
+  exit 1
+fi
+if [ -L "$LOG_FILE" ] || { [ -e "$LOG_FILE" ] && [ ! -f "$LOG_FILE" ]; }; then
+  echo "[bootstrap] FATAL: $LOG_FILE must be a regular file." 1>&2
+  exit 1
+fi
+if [ ! -e "$LOG_FILE" ]; then
+  : > "$LOG_FILE"
+fi
+if ! chown "$PUID:$PGID" "$LOG_DIR" "$LOG_FILE" || ! chmod 0700 "$LOG_DIR" || ! chmod 0600 "$LOG_FILE"; then
+  echo "[bootstrap] FATAL: could not prepare $LOG_FILE for PUID=$PUID PGID=$PGID." 1>&2
+  exit 1
+fi
+echo "[bootstrap] log target ready ($PUID:$PGID, dir=0700, file=0600)"
+
 
 # --- Clean up stale plugin-runtime-deps locks ---
 # A crashed container can leave the bundled-deps mirror lock behind; the
