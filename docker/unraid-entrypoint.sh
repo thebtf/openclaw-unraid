@@ -503,6 +503,19 @@ case "$DEFAULT_AGENT_ROLES_RESULT" in
     exit 1
     ;;
 esac
+# Migration and validation commands may create the shared SQLite state after
+# the initial ownership sweep. Re-align only this small managed directory
+# before the next PUID command; persisted workspaces and session trees remain
+# outside this bounded repair.
+STATE_DIR=/home/node/.openclaw/state
+if [ -d "$STATE_DIR" ] && find "$STATE_DIR" \( -not -uid "$PUID" -o -not -gid "$PGID" \) -print -quit 2>/dev/null | grep -q .; then
+  echo "[bootstrap] aligning newly created shared state ownership: $STATE_DIR"
+  chown -R "$PUID:$PGID" "$STATE_DIR" || {
+    echo "[bootstrap] FATAL: could not align newly created shared state ownership. Refusing managed writes." 1>&2
+    exit 1
+  }
+fi
+
 
 # --- WORKSPACE LEGACY STATE (PUID, upstream importer only) ---
 # Use the real config only after the exact config migration path has completed.
