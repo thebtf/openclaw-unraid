@@ -183,6 +183,12 @@ jobs:
             exit 1
           fi
 
+          # Recreate the reported stale-owner state entirely inside the Linux
+          # container. The next entrypoint run must repair it without losing
+          # the existing log bytes.
+          docker exec --user 0:0 smoke node -e \
+            "const fs=require('fs'); fs.chownSync('/tmp/openclaw',0,0); fs.chownSync('/tmp/openclaw/openclaw.log',0,0); fs.chmodSync('/tmp/openclaw',0o755); fs.chmodSync('/tmp/openclaw/openclaw.log',0o644)"
+
           docker restart smoke >/dev/null
           restarted=""
           for _ in $(seq 1 60); do
@@ -194,6 +200,7 @@ jobs:
           [ -n "$restarted" ] || { echo "SMOKE FAIL: repeated bootstrap did not reach gateway" 1>&2; exit 1; }
           test "$(docker exec smoke stat -c '%u:%g %a' /tmp/openclaw)" = "1026:100 700"
           test "$(docker exec smoke stat -c '%u:%g %a' /tmp/openclaw/openclaw.log)" = "1026:100 600"
+          docker exec smoke grep -q '^uid-1026-write$' /tmp/openclaw/openclaw.log
           if docker logs smoke 2>&1 | grep -q "log file append failed"; then
             echo "SMOKE FAIL: repeated start reported log append failure" 1>&2
             exit 1
