@@ -530,32 +530,36 @@ esac
 # Migration and validation commands may create shared SQLite state after the
 # initial ownership sweep. Ownership-only detection is insufficient: a file
 # can already belong to PUID:PGID while retaining a mode that denies its owner.
-# This tree is small and OpenClaw-managed, so enforce its complete access
-# contract before the next PUID command.
+# The tree is small and OpenClaw-managed, so reassert the complete contract at
+# each boundary before another PUID command consumes shared state.
 STATE_DIR=/home/node/.openclaw/state
 STATE_DB=$STATE_DIR/openclaw.sqlite
-if [ -L "$STATE_DIR" ] || { [ -e "$STATE_DIR" ] && [ ! -d "$STATE_DIR" ]; }; then
-  echo "[bootstrap] FATAL: $STATE_DIR must be a real directory." 1>&2
-  exit 1
-fi
-if ! mkdir -p "$STATE_DIR"; then
-  echo "[bootstrap] FATAL: could not create $STATE_DIR. Refusing managed writes." 1>&2
-  exit 1
-fi
-if [ -L "$STATE_DB" ] || { [ -e "$STATE_DB" ] && [ ! -f "$STATE_DB" ]; }; then
-  echo "[bootstrap] FATAL: $STATE_DB must be a regular file." 1>&2
-  exit 1
-fi
-if [ ! -e "$STATE_DB" ]; then
-  : > "$STATE_DB"
-fi
-echo "[bootstrap] aligning shared state access: $STATE_DIR"
-if ! chown -R "$PUID:$PGID" "$STATE_DIR" || \
-   ! find "$STATE_DIR" -type d -exec chmod 0700 {} + || \
-   ! find "$STATE_DIR" -type f -exec chmod 0600 {} +; then
-  echo "[bootstrap] FATAL: could not align shared state ownership and modes. Refusing managed writes." 1>&2
-  exit 1
-fi
+align_shared_state_access() {
+  if [ -L "$STATE_DIR" ] || { [ -e "$STATE_DIR" ] && [ ! -d "$STATE_DIR" ]; }; then
+    echo "[bootstrap] FATAL: $STATE_DIR must be a real directory." 1>&2
+    return 1
+  fi
+  if ! mkdir -p "$STATE_DIR"; then
+    echo "[bootstrap] FATAL: could not create $STATE_DIR. Refusing managed writes." 1>&2
+    return 1
+  fi
+  if [ -L "$STATE_DB" ] || { [ -e "$STATE_DB" ] && [ ! -f "$STATE_DB" ]; }; then
+    echo "[bootstrap] FATAL: $STATE_DB must be a regular file." 1>&2
+    return 1
+  fi
+  if [ ! -e "$STATE_DB" ]; then
+    : > "$STATE_DB"
+  fi
+  echo "[bootstrap] aligning shared state access: $STATE_DIR"
+  if ! chown -R "$PUID:$PGID" "$STATE_DIR" || \
+     ! find "$STATE_DIR" -type d -exec chmod 0700 {} + || \
+     ! find "$STATE_DIR" -type f -exec chmod 0600 {} +; then
+    echo "[bootstrap] FATAL: could not align shared state ownership and modes. Refusing managed writes." 1>&2
+    return 1
+  fi
+}
+
+align_shared_state_access || exit 1
 
 
 # --- WORKSPACE LEGACY STATE (PUID, upstream importer only) ---
@@ -606,6 +610,9 @@ case "$SESSION_MIGRATION_RESULT" in
     exit 1
     ;;
 esac
+# The session importer may initialize or replace shared SQLite artifacts.
+# Reassert access before managed config writes open that database again.
+align_shared_state_access || exit 1
 
 # --- MANAGED KEYS (every start, scalars only — idempotent, never destructive) ---
 # These are the template-owned gateway/logging fields. Deliberately NO
