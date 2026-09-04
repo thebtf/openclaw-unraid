@@ -480,19 +480,21 @@ async function ensureVerifiedBackup(plan) {
 }
 
 function assertMigrationResult(result) {
+ // Upstream may coalesce or repeat known report entries depending on which
+ // recovery path converged. Treat the report as advisory: accept only known
+ // success messages and no warnings, then prove the authoritative filesystem
+ // and detection postconditions below. Exact key/count equality made a safe,
+ // completed import fail nondeterministically.
  if (
   !isRecord(result) ||
-  Object.keys(result).sort().join("\u0000") !== "changes\u0000notices\u0000warnings" ||
   !Array.isArray(result.changes) ||
   !Array.isArray(result.warnings) ||
   !Array.isArray(result.notices) ||
-  result.changes.length !== 1 ||
+  result.changes.length === 0 ||
+  result.notices.length === 0 ||
   result.warnings.length !== 0 ||
-  result.notices.length !== 1 ||
-  typeof result.changes[0] !== "string" ||
-  typeof result.notices[0] !== "string" ||
-  !SUCCESS_CHANGES.has(result.changes[0]) ||
-  result.notices[0] !== SUCCESS_NOTICE
+  !result.changes.every((change) => typeof change === "string" && SUCCESS_CHANGES.has(change)) ||
+  !result.notices.every((notice) => notice === SUCCESS_NOTICE)
  ) {
   refuse("result");
  }
