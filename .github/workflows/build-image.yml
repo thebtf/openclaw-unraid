@@ -1546,6 +1546,10 @@ jobs:
             echo "SESSION STORE UPGRADE SMOKE FAIL: helper did not emit the exact applied count" 1>&2
             exit 1
           fi
+          if [ "$(printf '%s\n' "$session_log" | grep -Fxc '[bootstrap] aligning shared state access: /home/node/.openclaw/state' || true)" != "2" ]; then
+            echo "SESSION STORE UPGRADE SMOKE FAIL: shared state access was not reasserted after session migration" 1>&2
+            exit 1
+          fi
           if printf '%s\n' "$session_log" | grep -Fq "$session_config_secret" || printf '%s\n' "$session_log" | grep -Fq '"targets"'; then
             echo "SESSION STORE UPGRADE SMOKE FAIL: session migration log disclosed a fixture value or raw Doctor report" 1>&2
             exit 1
