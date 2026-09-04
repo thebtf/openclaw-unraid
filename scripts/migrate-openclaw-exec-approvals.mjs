@@ -492,11 +492,11 @@ function migrationResultRefusalCode(result) {
 }
 
 function assertMigrationResult(result) {
- // Upstream may coalesce or repeat known report entries depending on which
- // recovery path converged. Treat the report as advisory: accept only known
- // success messages and no warnings, then prove the authoritative filesystem
- // and detection postconditions below. Exact key/count equality made a safe,
- // completed import fail nondeterministically.
+ // Upstream may coalesce or repeat known report entries and add informational
+ // notices depending on which recovery path converged. Require only known
+ // success changes, no warnings, and the exact source-removal notice; other
+ // string notices are advisory and never logged. The authoritative filesystem
+ // and detection postconditions below still decide convergence.
  if (
   !isRecord(result) ||
   !Array.isArray(result.changes) ||
@@ -506,7 +506,8 @@ function assertMigrationResult(result) {
   result.notices.length === 0 ||
   result.warnings.length !== 0 ||
   !result.changes.every((change) => typeof change === "string" && SUCCESS_CHANGES.has(change)) ||
-  !result.notices.every((notice) => notice === SUCCESS_NOTICE)
+  !result.notices.every((notice) => typeof notice === "string") ||
+  !result.notices.includes(SUCCESS_NOTICE)
  ) {
   refuse(migrationResultRefusalCode(result));
  }
