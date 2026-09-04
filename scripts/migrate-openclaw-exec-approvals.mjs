@@ -479,6 +479,18 @@ async function ensureVerifiedBackup(plan) {
  }
 }
 
+function migrationResultRefusalCode(result) {
+ const record = isRecord(result);
+ const count = (value) => Array.isArray(value) ? value.length : "x";
+ const unknownChanges = Array.isArray(result?.changes)
+  ? result.changes.filter((change) => typeof change !== "string" || !SUCCESS_CHANGES.has(change)).length
+  : "x";
+ const unknownNotices = Array.isArray(result?.notices)
+  ? result.notices.filter((notice) => notice !== SUCCESS_NOTICE).length
+  : "x";
+ return `result-r${record ? 1 : 0}-k${record ? Object.keys(result).length : "x"}-c${count(result?.changes)}-w${count(result?.warnings)}-n${count(result?.notices)}-cu${unknownChanges}-nu${unknownNotices}`;
+}
+
 function assertMigrationResult(result) {
  // Upstream may coalesce or repeat known report entries depending on which
  // recovery path converged. Treat the report as advisory: accept only known
@@ -496,7 +508,7 @@ function assertMigrationResult(result) {
   !result.changes.every((change) => typeof change === "string" && SUCCESS_CHANGES.has(change)) ||
   !result.notices.every((notice) => notice === SUCCESS_NOTICE)
  ) {
-  refuse("result");
+  refuse(migrationResultRefusalCode(result));
  }
 }
 
