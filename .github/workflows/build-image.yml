@@ -122,6 +122,30 @@ jobs:
             org.opencontainers.image.base.digest=${{ steps.base.outputs.digest }}
           tags: ${{ env.DERIVED_IMAGE }}:smoke
 
+      - name: Exec approvals detection diagnostics smoke
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          set -eu
+          docker run --rm --network none --entrypoint node "$DERIVED_IMAGE:smoke" -e '
+            const assert = require("node:assert/strict");
+            const fs = require("node:fs");
+            const { spawnSync } = require("node:child_process");
+            const stateDir = "/home/node/.openclaw/state";
+            const database = `${stateDir}/openclaw.sqlite`;
+            const privateValue = "exec-approvals-detection-private-fixture";
+            const before = Buffer.from(privateValue);
+            fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+            fs.writeFileSync(database, before, { mode: 0o600 });
+            for (const file of ["/home/node/.openclaw", stateDir, database]) fs.chownSync(file, 1000, 1000);
+            const result = spawnSync("setpriv", ["--reuid=1000", "--regid=1000", "--init-groups", "node", "/usr/local/bin/migrate-openclaw-exec-approvals.mjs"], { encoding: "utf8" });
+            assert.equal(result.status, 1, "invalid SQLite must still refuse startup");
+            assert.ok(result.stdout.trim() === "exec-approvals-migration: refused code=detection", "bounded refusal must be preserved");
+            assert.ok(/^exec-approvals-detection: type=[A-Za-z]+ code=[A-Za-z_]+ frames=[A-Za-z0-9_.:,-]+$/m.test(result.stderr), "missing bounded native exception evidence");
+            assert.ok(!(result.stdout + result.stderr).includes(privateValue), "diagnostics disclosed persisted bytes");
+            assert.ok(fs.readFileSync(database).equals(before), "refused detection changed SQLite source bytes");
+          '
+          echo "EXEC APPROVALS DETECTION DIAGNOSTICS SMOKE OK"
+
       # The root entrypoint must not make Docker's healthcheck a root state writer.
       - name: Healthcheck identity smoke
         if: steps.gate.outputs.build == 'true'

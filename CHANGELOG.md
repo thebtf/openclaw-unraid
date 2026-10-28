@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Linux migrator execution.** Python scripts now have an explicit LF checkout policy so the image's executable migrator shebang works from Windows build contexts as well as Linux CI.
 - **Restart log-ownership smoke.** Stops the entire throwaway container before preparing stale log ownership through a shared log volume; stopping only tini left the Gateway running during the fixture mutation. Existing log bytes, UID/GID, restrictive modes, and repeated bootstrap checks remain covered, and restart failures include container state and bounded logs.
 - **Healthcheck runtime identity.** Runs the upstream health probe as the same PUID:PGID as the Gateway, retaining its port discovery, HTTP health test, and timing settings. The inherited probe previously ran as root and could create private SQLite state or ownership locks that blocked non-root bootstrap. A no-Gateway regression checks the unhealthy result and state ownership through the image's actual healthcheck command.
+- **Bounded exec-approvals detection diagnostics.** A refused native detector now reports only allowlisted exception types and error codes plus existing compiled-image stack locations. It still refuses startup without logging exception messages, approval contents, or raw reports; this preserves the missing evidence from a failed repeated bootstrap.
 
 - **Custom LLM first-boot seed.** Uses keyed `agents.entries.main.model` and preserves other agents and models.
 

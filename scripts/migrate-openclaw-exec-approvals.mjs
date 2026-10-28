@@ -41,6 +41,18 @@ function refuse(code) {
  throw new ExecApprovalsMigrationRefused(code);
 }
 
+function reportDetectionFailure(error) {
+ const names = new Set(["Error", "TypeError", "RangeError", "SqliteCoordinatorError", "SqliteSnapshotCleanupError", "StateDatabaseAdmissionPendingError", "StateDatabaseReadAdmissionInvalidatedError"]);
+ const codes = new Set(["EACCES", "EPERM", "ENOENT", "EINVAL", "ERR_SQLITE_ERROR", "SQLITE_BUSY", "SQLITE_LOCKED", "SQLITE_READONLY", "SQLITE_IOERR", "SQLITE_CORRUPT", "SQLITE_CANTOPEN", "SQLITE_NOTADB"]);
+ const name = names.has(error?.name) ? error.name : "unknown";
+ const code = codes.has(error?.code) ? error.code : "unknown";
+ const frames = typeof error?.stack === "string" ? error.stack.split("\n").slice(1).flatMap((line) => {
+  const match = /^\s+at (?:[^()\n]+ \()?file:\/\/\/app\/dist\/([A-Za-z0-9_.-]+\.(?:mjs|js)):(\d{1,6}):(\d{1,6})\)?$/.exec(line);
+  return match && fsConstants.existsSync(`/app/dist/${match[1]}`) ? [`${match[1]}:${match[2]}:${match[3]}`] : [];
+ }).slice(0, 3) : [];
+ process.stderr.write(`exec-approvals-detection: type=${name} code=${code} frames=${frames.join(",") || "none"}\n`);
+}
+
 function isRecord(value) {
  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -551,7 +563,8 @@ async function main() {
  let detected;
  try {
   detected = await adapter.detectLegacyExecApprovals(detectionParameters);
- } catch {
+ } catch (error) {
+  reportDetectionFailure(error);
   refuse("detection");
  }
  assertDetectionShape(detected, runtimePaths.stateDir);
@@ -559,7 +572,8 @@ async function main() {
   let confirmed;
   try {
    confirmed = await adapter.detectLegacyExecApprovals(detectionParameters);
-  } catch {
+  } catch (error) {
+   reportDetectionFailure(error);
    refuse("detection");
   }
   assertDetectionShape(confirmed, runtimePaths.stateDir);
