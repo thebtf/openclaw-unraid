@@ -869,6 +869,7 @@ jobs:
           workspace_source_secret='workspace-source-secret-1c38ab'
           backup_suffix='.openclaw-2026.8.1-pre-migration.bak'
           dry_run_refusal_marker='[bootstrap] FATAL: existing OpenClaw config needs no migration; workspace migration was not run because OPENCLAW_CONFIG_MIGRATION=dry-run is inspection-only. Refusing managed writes.'
+          legacy_default_dry_run_refusal_marker='[bootstrap] FATAL: existing OpenClaw config needs a supported v2026.8.1 migration. OPENCLAW_CONFIG_MIGRATION=dry-run is inspection-only; it left the config byte-identical and created no backup. Restart with OPENCLAW_CONFIG_MIGRATION=auto (the default) to apply it, or use OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1 as an advanced explicit apply. Refusing managed writes.'
           absent_config_dry_run_refusal_marker='[bootstrap] FATAL: no existing OpenClaw config needs migration; workspace migration was not run because OPENCLAW_CONFIG_MIGRATION=dry-run is inspection-only. No config, workspace, backup, or SQLite state was created.'
 
           cleanup() {
@@ -1012,7 +1013,7 @@ jobs:
             '
 
           # Config migration dry-run must stop before the workspace helper,
-          # even when the persisted config is valid and a real workspace source
+          # even when only retired default markers need config migration and a workspace source
           # would otherwise be eligible for automatic import.
           docker run --rm --entrypoint /bin/sh \
             -v "$dry_run_volume:/home/node/.openclaw" \
@@ -1034,7 +1035,7 @@ jobs:
             echo "WORKSPACE UPGRADE SMOKE FAIL: valid-config dry-run exited successfully" 1>&2
             exit 1
           fi
-          if [ "$(printf '%s\n' "$dry_run_log" | grep -Fxc "$dry_run_refusal_marker" || true)" != "1" ]; then
+          if [ "$(printf '%s\n' "$dry_run_log" | grep -Fxc -e "$dry_run_refusal_marker" -e "$legacy_default_dry_run_refusal_marker" || true)" != "1" ]; then
             echo "WORKSPACE UPGRADE SMOKE FAIL: valid-config dry-run omitted its bounded inspection-only refusal" 1>&2
             exit 1
           fi
@@ -1205,6 +1206,12 @@ jobs:
             const { DatabaseSync } = require("node:sqlite");
             const fail = (message) => { console.error(`WORKSPACE UPGRADE SMOKE FAIL: ${message}`); process.exit(1); };
             const configDir = "/home/node/.openclaw";
+            const config = JSON.parse(fs.readFileSync(path.join(configDir, "openclaw.json"), "utf8"));
+            if (!Object.hasOwn(config.agents.entries.main, "default")) {
+              if (config.agents.ownership !== "explicit" || config.agents.defaults.systemAgent.agentId !== "main" || config.agents.entries.main.workspace !== path.join(configDir, "workspace")) fail("retired default owner or workspace was not preserved");
+              const configBackups = fs.readdirSync(configDir).filter((name) => /^openclaw\.json\.v2026\.8\.1-backup-/.test(name));
+              if (configBackups.length !== 1 || !fs.readFileSync(path.join(configDir, configBackups[0])).equals(fs.readFileSync("/fixtures/openclaw.json"))) fail("default-marker migration lacks one byte-identical config backup");
+            }
             const sourceName = "openclaw-workspace-state.json";
             const backupSuffix = ".openclaw-2026.8.1-pre-migration.bak";
             const agentIds = ["borges", "jeeves", "babarsky", "randal", "glados"];
@@ -1514,9 +1521,20 @@ jobs:
               cp /fixtures/main-session.jsonl /home/node/.openclaw/agents/main/sessions/main-session.jsonl
               chown -R 1000:1000 /home/node/.openclaw
             '
-          if ! docker run --rm --user 1000:1000 --entrypoint node \
+          # Seed canonical session state using a private current-schema view;
+          # the original persisted legacy config remains the later upgrade input.
+          if ! docker run --rm --user 1000:1000 --entrypoint /bin/sh \
             -v "$session_volume:/home/node/.openclaw" \
-            "$DERIVED_IMAGE:smoke" /app/dist/index.js doctor --session-sqlite import --session-sqlite-all-agents --json \
+            -v "$session_fixture_dir:/fixtures:ro" \
+            "$DERIVED_IMAGE:smoke" -ceu '
+              candidate_dir=$(mktemp -d)
+              trap '\''rm -rf "$candidate_dir"'\'' EXIT
+              cp /home/node/.openclaw/openclaw.json "$candidate_dir/openclaw.json"
+              python3 /usr/local/bin/migrate-openclaw-2-config.py --config "$candidate_dir/openclaw.json" --retire-default-markers --apply >/dev/null
+              cmp -s /home/node/.openclaw/openclaw.json /fixtures/openclaw.json
+              OPENCLAW_CONFIG_PATH="$candidate_dir/openclaw.json" node /app/dist/index.js doctor --session-sqlite import --session-sqlite-all-agents --json
+              cmp -s /home/node/.openclaw/openclaw.json /fixtures/openclaw.json
+            ' \
             > "$session_fixture_dir/seed-report.json" 2> "$session_fixture_dir/seed-error.log"; then
             echo "SESSION STORE UPGRADE SMOKE FAIL: public seed importer did not complete" 1>&2
             exit 1
@@ -1554,9 +1572,8 @@ jobs:
             echo "SESSION STORE UPGRADE SMOKE FAIL: session migration log disclosed a fixture value or raw Doctor report" 1>&2
             exit 1
           fi
-          if ! docker run --rm --user 1000:1000 --entrypoint node \
-            -v "$session_volume:/home/node/.openclaw" \
-            "$DERIVED_IMAGE:smoke" /app/dist/index.js doctor --session-sqlite dry-run --session-sqlite-all-agents --json \
+          if ! docker exec --user 1000:1000 "$session_container" \
+            node /app/dist/index.js doctor --session-sqlite dry-run --session-sqlite-all-agents --json \
             > "$session_fixture_dir/postflight.json" 2> "$session_fixture_dir/postflight-error.log"; then
             echo "SESSION STORE UPGRADE SMOKE FAIL: focused postflight did not complete" 1>&2
             exit 1
@@ -1751,6 +1768,143 @@ jobs:
               -e CUSTOM_LLM_MODEL_ID=exec-approvals-role-smoke-model \
               "$DERIVED_IMAGE:smoke"
           }
+
+          # Retired keyed markers preserve their actual owner, not necessarily main.
+          docker run --rm --entrypoint node "$DERIVED_IMAGE:smoke" --input-type=module -e '
+            import { createRequire } from "node:module";
+            const require = createRequire(import.meta.url);
+            const assert = require("node:assert/strict");
+            const fs = require("node:fs");
+            const os = require("node:os");
+            const path = require("node:path");
+            const { spawnSync } = require("node:child_process");
+            const record = JSON.parse(fs.readFileSync("/usr/local/lib/openclaw-unraid-default-agent-roles.json"));
+            const adapter = await import(record.adapterPath);
+            const root = fs.mkdtempSync(path.join(os.tmpdir(), "ownership-smoke-"));
+            const migrate = (name, config, success) => {
+              const directory = path.join(root, name);
+              fs.mkdirSync(directory);
+              const file = path.join(directory, "openclaw.json");
+              const original = Buffer.from(JSON.stringify(config));
+              fs.writeFileSync(file, original);
+              const result = spawnSync("python3", ["/usr/local/bin/migrate-openclaw-2-config.py", "--config", file, "--retire-default-markers", "--apply"], { encoding: "utf8" });
+              assert.equal(result.status, success ? 0 : 1, `${name}: migration status`);
+              const backups = fs.readdirSync(directory).filter((entry) => entry.includes("-backup-"));
+              assert.equal(backups.length, success ? 1 : 0, `${name}: backup count`);
+              if (!success) {
+                assert.deepEqual(fs.readFileSync(file), original, `${name}: refusal changed source`);
+                return;
+              }
+              assert.deepEqual(fs.readFileSync(path.join(directory, backups[0])), original, `${name}: backup bytes`);
+              const migrated = JSON.parse(fs.readFileSync(file));
+              const restart = spawnSync("python3", ["/usr/local/bin/migrate-openclaw-2-config.py", "--config", file, "--retire-default-markers", "--apply"], { encoding: "utf8" });
+              assert.equal(restart.status, 0, `${name}: restart status`);
+              assert.equal(restart.stdout.trim(), "already migrated", `${name}: restart changed config`);
+              assert.equal(fs.readdirSync(directory).filter((entry) => entry.includes("-backup-")).length, 1);
+              return migrated;
+            };
+            try {
+              const marked = { agents: { entries: { main: {}, borges: { default: true }, glados: { default: false } }, defaults: { workspace: "/home/node/custom-legacy-workspace" } }, session: { store: "/home/node/legacy-sessions.json" }, bindings: [{ agentId: "glados", match: { channel: "telegram", accountId: "named" } }] };
+              if (typeof adapter.retireLegacyAgentDefaultMarkers !== "function") {
+                const file = path.join(root, "legacy.json");
+                const original = JSON.stringify(marked);
+                fs.writeFileSync(file, original);
+                const result = spawnSync("python3", ["/usr/local/bin/migrate-openclaw-2-config.py", "--config", file, "--retire-default-markers", "--apply"], { encoding: "utf8" });
+                assert.equal(result.status, 0);
+                assert.equal(result.stdout.trim(), "already migrated");
+                assert.equal(fs.readFileSync(file, "utf8"), original);
+                assert.deepEqual(fs.readdirSync(root), ["legacy.json"]);
+              } else {
+              const migrated = migrate("non-main", marked, true);
+              assert.equal(migrated.agents.ownership, "explicit");
+              assert.equal(migrated.agents.entries.borges.workspace, "/home/node/custom-legacy-workspace");
+              for (const entry of Object.values(migrated.agents.entries)) assert.equal(Object.hasOwn(entry, "default"), false);
+              for (const role of ["heartbeat", "systemAgent", "authInheritance", "sessionStore"]) assert.equal(migrated.agents.defaults[role].agentId, "borges");
+              assert.equal(migrated.talk.agentId, "borges");
+              assert.deepEqual(migrated.bindings[0], marked.bindings[0]);
+              assert.equal(migrated.bindings.filter((binding) => binding.agentId === "borges" && binding.match.channel === "telegram" && binding.match.accountId === "*").length, 1);
+              fs.mkdirSync("/home/node/.openclaw", { recursive: true });
+              const canonical = "/home/node/.openclaw/openclaw.json";
+              const owned = JSON.stringify(migrated);
+              fs.writeFileSync(canonical, owned);
+              const roles = spawnSync(process.execPath, ["/usr/local/bin/materialize-legacy-default-agent-roles.mjs"], { encoding: "utf8" });
+              assert.equal(roles.status, 0);
+              assert.equal(roles.stdout.trim(), "default-agent-roles: already-materialized");
+              assert.equal(fs.readFileSync(canonical, "utf8"), owned);
+              const pinned = structuredClone(marked);
+              pinned.agents.entries.borges.workspace = "/home/node/pinned-workspace";
+              pinned.agents.defaults.heartbeat = { agentId: "glados" };
+              pinned.agents.defaults.systemAgent = { agentId: "glados" };
+              pinned.agents.defaults.authInheritance = { agentId: "glados" };
+              pinned.agents.defaults.sessionStore = { agentId: "glados" };
+              pinned.talk = { agentId: "glados" };
+              pinned.bindings.push({ agentId: "glados", match: { channel: "telegram", accountId: "*" } });
+              const preserved = migrate("explicit-targets", pinned, true);
+              assert.deepEqual(preserved.agents.defaults, pinned.agents.defaults);
+              assert.equal(preserved.agents.entries.borges.workspace, pinned.agents.entries.borges.workspace);
+              assert.deepEqual(preserved.bindings, pinned.bindings);
+              assert.deepEqual(preserved.talk, pinned.talk);
+              const conflicting = structuredClone(marked);
+              conflicting.agents.ownership = "explicit";
+              migrate("conflicting", conflicting, false);
+              const ambiguous = structuredClone(marked);
+              ambiguous.agents.entries.main.default = true;
+              migrate("ambiguous", ambiguous, false);
+              const malformed = structuredClone(marked);
+              malformed.agents.entries.borges.default = "true";
+              migrate("malformed", malformed, false);
+              const sole = migrate("sole", { agents: { entries: { borges: { default: true } } } }, true);
+              assert.deepEqual(sole, { agents: { entries: { borges: {} } } });
+              const unmarked = migrate("false-markers", { agents: { entries: { main: { default: false }, borges: {} } } }, true);
+              assert.deepEqual(unmarked, { agents: { entries: { main: {}, borges: {} }, ownership: "explicit" } });
+              const { saveCronStore } = await import("/app/dist/plugin-sdk/cron-store-runtime.js");
+              const { DatabaseSync } = require("node:sqlite");
+              const cronStore = "/home/node/.openclaw/custom-cron/jobs.json";
+              const cronConfig = structuredClone(marked);
+              cronConfig.cron = { store: cronStore };
+              const job = { id: "ownership-fixture", name: "ownership fixture", enabled: false, createdAtMs: 1, updatedAtMs: 1, schedule: { kind: "every", everyMs: 60000 }, sessionTarget: "main", wakeMode: "now", payload: { kind: "systemEvent", text: "fixture" }, delivery: { mode: "none" }, state: {} };
+              const readCronRows = () => {
+                const db = new DatabaseSync("/home/node/.openclaw/state/openclaw.sqlite", { readOnly: true });
+                try { return db.prepare("SELECT * FROM cron_jobs WHERE store_key = ? ORDER BY job_id").all(cronStore); }
+                finally { db.close(); }
+              };
+              await saveCronStore(cronStore, { version: 1, jobs: [job] });
+              let beforeJobs = readCronRows();
+              migrate("ownerless-cron", cronConfig, false);
+              assert.deepEqual(readCronRows(), beforeJobs, "cron refusal changed a job or its runtime state");
+              const envCronConfig = structuredClone(cronConfig);
+              envCronConfig.cron.store = "${CRON_STORE_PATH}";
+              process.env.CRON_STORE_PATH = cronStore;
+              migrate("env-ownerless-cron", envCronConfig, false);
+              assert.deepEqual(readCronRows(), beforeJobs, "templated-store refusal changed jobs");
+              delete process.env.CRON_STORE_PATH;
+              migrate("missing-env-cron", envCronConfig, false);
+              assert.deepEqual(readCronRows(), beforeJobs, "unresolved-store refusal changed jobs");
+              const sqlOwnerDb = new DatabaseSync("/home/node/.openclaw/state/openclaw.sqlite");
+              sqlOwnerDb.prepare("UPDATE cron_jobs SET agent_id = ? WHERE store_key = ?").run("glados", cronStore);
+              sqlOwnerDb.close();
+              beforeJobs = readCronRows();
+              migrate("sql-only-cron-owner", cronConfig, false);
+              assert.deepEqual(readCronRows(), beforeJobs, "cron refusal changed an independently stored SQL owner");
+              await saveCronStore(cronStore, { version: 1, jobs: [{ ...job, agentId: "glados" }] });
+              beforeJobs = readCronRows();
+              migrate("explicit-cron-owner", cronConfig, true);
+              assert.deepEqual(readCronRows(), beforeJobs, "marker retirement changed an explicitly owned job");
+              await saveCronStore(cronStore, { version: 1, jobs: [{ ...job, sessionKey: "agent:glados:main" }] });
+              beforeJobs = readCronRows();
+              migrate("session-key-cron-owner", cronConfig, true);
+              assert.deepEqual(readCronRows(), beforeJobs, "marker retirement changed an agent-scoped job");
+              fs.mkdirSync(path.dirname(cronStore), { recursive: true });
+              const retiredJobs = JSON.stringify({ version: 1, jobs: [job] });
+              fs.writeFileSync(cronStore, retiredJobs);
+              migrate("retired-cron-source", cronConfig, false);
+              assert.equal(fs.readFileSync(cronStore, "utf8"), retiredJobs);
+              assert.deepEqual(readCronRows(), beforeJobs, "retired-source refusal changed canonical jobs");
+              }
+            } finally {
+              fs.rmSync(root, { recursive: true, force: true });
+            }
+          '
 
           fixture_dir=$(mktemp -d)
           cp scripts/fixtures/legacy-default-agent-roles.json "$fixture_dir/openclaw.json"

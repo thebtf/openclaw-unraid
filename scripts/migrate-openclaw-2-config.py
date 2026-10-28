@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -805,12 +806,39 @@ def _print_paths(heading: str, paths: Sequence[str]) -> None:
         print("  - " + path)
 
 
-def migrate(config_path: Path, apply: bool) -> int:
+def _retire_default_markers(root: Dict[str, Any], changes: List[str]) -> Dict[str, Any]:
+    entries = root.get("agents", {}).get("entries", {})
+    if not any("default" in entry for entry in entries.values()):
+        return root
+    # The image-pinned native functions retain the original owner and workspace.
+    env = dict(os.environ, HOME="/home/node", OPENCLAW_HOME="/home/node",
+               OPENCLAW_STATE_DIR="/home/node/.openclaw", OPENCLAW_CONFIG_DIR="/home/node/.openclaw",
+               OPENCLAW_CONFIG_PATH="/home/node/.openclaw/openclaw.json",
+               OPENCLAW_WORKSPACE_DIR="/home/node/.openclaw/workspace")
+    try:
+        result = subprocess.run(
+            ["node", str(Path(__file__).with_name("materialize-legacy-default-agent-roles.mjs")), "--retire-default-markers"],
+            input=json.dumps(root), capture_output=True, text=True, env=env, timeout=30, check=True,
+        )
+        transformed = json.loads(result.stdout)
+    except (subprocess.SubprocessError, ValueError, OSError):
+        raise MigrationError("native default-agent ownership migration refused") from None
+    if (not isinstance(transformed, dict) or set(transformed) != {"config", "paths"}
+            or not isinstance(transformed["config"], dict) or not isinstance(transformed["paths"], list)
+            or not all(isinstance(path, str) for path in transformed["paths"])):
+        raise MigrationError("native default-agent ownership migration returned an invalid result")
+    changes.extend(path for path in transformed["paths"] if path not in changes)
+    return transformed["config"]
+
+
+def migrate(config_path: Path, apply: bool, retire_default_markers: bool = False) -> int:
     original, source_fingerprint, mode = _read_regular_file(config_path)
     root, has_bom = _load_json(original)
     normalized_models = _validate_configuration(root)
 
     changes = _migrate(root, normalized_models)
+    if retire_default_markers:
+        root = _retire_default_markers(root, changes)
     converted_legacy_list = "agents.list" in changes
     _validate_configuration(root)
     _assert_legacy_paths_absent(root, converted_legacy_list)
@@ -866,6 +894,8 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         description="Apply only the OpenClaw v2026.8.1 recovery migrations to a JSON config."
     )
     parser.add_argument("--config", required=True, type=Path, metavar="PATH", help="OpenClaw JSON config")
+    parser.add_argument("--retire-default-markers", action="store_true",
+                        help="use the image-pinned native default-agent ownership migration")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument(
         "--apply",
@@ -883,7 +913,7 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = _parse_args(argv)
     try:
-        return migrate(args.config.expanduser(), args.apply)
+        return migrate(args.config.expanduser(), args.apply, args.retire_default_markers)
     except MigrationError as error:
         print("ERROR: " + str(error), file=sys.stderr)
         return 1

@@ -269,6 +269,11 @@ function requireReport(execution, phase) {
 }
 
 async function main() {
+  const preflightOnly = process.argv.length === 3 && process.argv[2] === "--preflight";
+  if (!preflightOnly && process.argv.length !== 2) {
+    emitFailure("arguments", "helper");
+    return;
+  }
   const preflightReport = requireReport(await runDoctor("dry-run"), "preflight");
   if (!preflightReport) {
     return;
@@ -284,6 +289,10 @@ async function main() {
   }
   if (preflightReport.totals.targets === 0) {
     emitFailure("preflight-zero-denominator", "0");
+    return;
+  }
+  if (preflightOnly) {
+    process.stdout.write("session-migration: preflight\n");
     return;
   }
 

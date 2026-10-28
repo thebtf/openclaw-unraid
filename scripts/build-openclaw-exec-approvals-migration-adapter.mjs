@@ -7,12 +7,8 @@ import { pathToFileURL } from "node:url";
 import { TextDecoder } from "node:util";
 
 const REQUIRED_EXPORTS = ["detectLegacyExecApprovals", "migrateLegacyExecApprovals"];
-const COMPILED_EXPORTS = {
-  detectLegacyExecApprovals: "t",
-  migrateLegacyExecApprovals: "n",
-};
 const ADAPTER_BASENAME = "openclaw-unraid-exec-approvals-migration-adapter.mjs";
-const CHUNK_FILENAME = /^state-migrations\.exec-approvals-[A-Za-z0-9_-]+\.js$/;
+const CHUNK_FILENAME = /^state-migrations\.exec-approvals-[A-Za-z0-9_-]+\.(?:mjs|js)$/;
 const RECORD_VERSION = 1;
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -24,6 +20,14 @@ function sha256(contents) {
 
 function moduleUrl(modulePath) {
   return pathToFileURL(modulePath).href;
+}
+
+function hasExactlyOneNamedFunctionDeclaration(source, name) {
+  const declaration = new RegExp(
+    String.raw`(?:^|[;}\n])\s*(?:async\s+)?function\s+${name}\s*\(`,
+    "g",
+  );
+  return [...source.matchAll(declaration)].length === 1;
 }
 
 function parseTerminalExports(source) {
@@ -52,16 +56,14 @@ function parseTerminalExports(source) {
 
 function patchModuleExports(source) {
   const parsed = parseTerminalExports(source);
-  const byExportedName = new Map(parsed.mappings.map((mapping) => [mapping.exported, mapping.local]));
-  if (!REQUIRED_EXPORTS.every((name) => byExportedName.has(COMPILED_EXPORTS[name]))) {
-    throw new BuildContractError("OpenClaw exec approvals module is missing an exact v2026.8.2 export");
+  if (!REQUIRED_EXPORTS.every((name) =>
+    hasExactlyOneNamedFunctionDeclaration(source, name) &&
+    parsed.mappings.some((mapping) => mapping.local === name))) {
+    throw new BuildContractError("OpenClaw exec approvals module is missing an exact migration function export");
   }
-  const selected = REQUIRED_EXPORTS.map(
-    (name) => `${byExportedName.get(COMPILED_EXPORTS[name])} as ${name}`,
-  );
   return [
     `${parsed.body}${parsed.separator}`.trimEnd(),
-    `export { ${selected.join(", ")} };`,
+    `export { ${REQUIRED_EXPORTS.join(", ")} };`,
     "",
   ].join("\n");
 }
@@ -85,7 +87,9 @@ async function findExecApprovalsModule(distDir) {
     } catch {
       continue;
     }
-    if (!REQUIRED_EXPORTS.every((name) => exports.mappings.some((mapping) => mapping.exported === COMPILED_EXPORTS[name]))) {
+    if (!REQUIRED_EXPORTS.every((name) =>
+      hasExactlyOneNamedFunctionDeclaration(source, name) &&
+      exports.mappings.some((mapping) => mapping.local === name))) {
       continue;
     }
     candidates.push({ sourceModulePath, sourceBytes, source });

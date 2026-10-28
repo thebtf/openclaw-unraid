@@ -654,18 +654,22 @@ function hasWarnings(result) {
 }
 
 async function main() {
- if (process.argv.length !== 2) {
+ const preflightOnly = process.argv.length === 4 && process.argv[2] === "--preflight-config";
+ if (!preflightOnly && process.argv.length !== 2) {
   refuse();
  }
 
+ const runtimePaths = resolveRuntimePaths();
+ const configPath = preflightOnly ? process.argv[3] : runtimePaths.configPath;
+ await openStableRegularFile(configPath, RUNTIME_ARTIFACT_MAX_BYTES, false);
+ if (preflightOnly) process.env.OPENCLAW_CONFIG_PATH = configPath;
  const record = await readRuntimeRecord();
  const { adapter, loadConfig } = await loadRuntime(record);
- const runtimePaths = resolveRuntimePaths();
  await Promise.all([
   assertDirectoryWithoutSymlinks(runtimePaths.home),
   assertDirectoryWithoutSymlinks(runtimePaths.stateDir),
   assertDirectoryWithoutSymlinks(runtimePaths.workspaceDir),
-  openStableRegularFile(runtimePaths.configPath, RUNTIME_ARTIFACT_MAX_BYTES, false),
+  openStableRegularFile(configPath, RUNTIME_ARTIFACT_MAX_BYTES, false),
  ]);
 
  let cfg;
@@ -695,7 +699,7 @@ async function main() {
  };
  let detected;
  try {
-  detected = adapter.detectLegacyWorkspaceState(detectionParameters);
+  detected = await adapter.detectLegacyWorkspaceState(detectionParameters);
  } catch {
   refuse();
  }
@@ -703,7 +707,7 @@ async function main() {
  if (!detected.hasLegacy) {
   let confirmed;
   try {
-   confirmed = adapter.detectLegacyWorkspaceState(detectionParameters);
+   confirmed = await adapter.detectLegacyWorkspaceState(detectionParameters);
   } catch {
    refuse();
   }
@@ -711,20 +715,21 @@ async function main() {
   if (confirmed.hasLegacy) {
    refuse();
   }
-  return "workspace-migration: no-op";
+  return preflightOnly ? "workspace-migration: preflight" : "workspace-migration: no-op";
  }
 
  const plans = [];
  for (const source of detected.sources) {
   plans.push(await inspectActiveSource(source));
  }
+ for (const plan of plans) {
+  preflightSource(adapter, plan);
+ }
+ if (preflightOnly) return "workspace-migration: preflight";
 
  const preparedBackups = [];
  const createdBackups = [];
  try {
-  for (const plan of plans) {
-   preflightSource(adapter, plan);
-  }
   for (const plan of plans) {
    const backup = await ensureVerifiedBackup(plan);
    preparedBackups.push({ plan, backup });
@@ -771,7 +776,7 @@ async function main() {
 
  let after;
  try {
-  after = adapter.detectLegacyWorkspaceState(detectionParameters);
+  after = await adapter.detectLegacyWorkspaceState(detectionParameters);
  } catch {
   refuse();
  }

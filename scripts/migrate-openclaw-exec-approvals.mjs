@@ -250,7 +250,8 @@ function resolveRuntimePaths() {
 function assertDetectionShape(detected, stateDir) {
  if (
   !isRecord(detected) ||
-  Object.keys(detected).sort().join("\u0000") !== "hasLegacy\u0000sourcePath" ||
+  !["hasLegacy\u0000sourcePath", "hasLegacy\u0000preview\u0000sourcePath"].includes(Object.keys(detected).sort().join("\u0000")) ||
+  (Object.hasOwn(detected, "preview") && typeof detected.preview !== "string") ||
   typeof detected.hasLegacy !== "boolean" ||
   detected.sourcePath !== path.join(stateDir, SOURCE_BASENAME)
  ) {
@@ -549,7 +550,7 @@ async function main() {
 
  let detected;
  try {
-  detected = adapter.detectLegacyExecApprovals(detectionParameters);
+  detected = await adapter.detectLegacyExecApprovals(detectionParameters);
  } catch {
   refuse("detection");
  }
@@ -557,7 +558,7 @@ async function main() {
  if (!detected.hasLegacy) {
   let confirmed;
   try {
-   confirmed = adapter.detectLegacyExecApprovals(detectionParameters);
+   confirmed = await adapter.detectLegacyExecApprovals(detectionParameters);
   } catch {
    refuse("detection");
   }
@@ -590,7 +591,7 @@ async function main() {
 
  let after;
  try {
-  after = adapter.detectLegacyExecApprovals(detectionParameters);
+  after = await adapter.detectLegacyExecApprovals(detectionParameters);
  } catch {
   refuse("convergence");
  }

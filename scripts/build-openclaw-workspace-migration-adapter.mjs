@@ -20,7 +20,7 @@ const REQUIRED_EXPORTS = [
 const ADAPTER_BASENAME = "openclaw-unraid-workspace-migration-adapter.mjs";
 const RECORD_VERSION = 1;
 const CONFIG_FACADE_RELATIVE_PATH = "index.js";
-const DOCTOR_MODULE_FILENAME = /^state-migrations\.doctor-[A-Za-z0-9_-]+\.js$/;
+const DOCTOR_MODULE_FILENAME = /^state-migrations\.doctor-[A-Za-z0-9_-]+\.(?:mjs|js)$/;
 
 class BuildContractError extends Error { }
 

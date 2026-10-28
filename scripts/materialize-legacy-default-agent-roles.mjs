@@ -16,6 +16,8 @@ import { isDeepStrictEqual, TextDecoder } from "node:util";
 const RECORD_PATH = "/usr/local/lib/openclaw-unraid-default-agent-roles.json";
 const ADAPTER_BASENAME = "openclaw-unraid-default-agent-roles-adapter.mjs";
 const REQUIRED_ADAPTER_EXPORT = "materializeLegacyDefaultAgentRoles";
+const OPTIONAL_ADAPTER_EXPORT = "retireLegacyAgentDefaultMarkers";
+const CRON_GUARD_EXPORT = "assertLegacyCronOwnershipBeforeConfigWrite";
 const RUNTIME_ARTIFACT_MAX_BYTES = 32 * 1024 * 1024;
 const RUNTIME_RECORD_MAX_BYTES = 16 * 1024;
 const CONFIG_MAX_BYTES = 32 * 1024 * 1024;
@@ -165,8 +167,10 @@ async function readRuntimeRecord() {
  }
  if (
   !isRecord(parsed) ||
-  Object.keys(parsed).sort().join("\u0000") !==
-  "adapterPath\u0000adapterSha256\u0000sourceModulePath\u0000sourceModuleSha256\u0000version" ||
+  ![
+   "adapterPath\u0000adapterSha256\u0000sourceModulePath\u0000sourceModuleSha256\u0000version",
+   "adapterPath\u0000adapterSha256\u0000cronSafetyModules\u0000sourceModulePath\u0000sourceModuleSha256\u0000version",
+  ].includes(Object.keys(parsed).sort().join("\u0000")) ||
   parsed.version !== 1 ||
   !isAbsoluteNormalizedPath(parsed.adapterPath) ||
   !isAbsoluteNormalizedPath(parsed.sourceModulePath) ||
@@ -177,6 +181,13 @@ async function readRuntimeRecord() {
  ) {
   refuse("record");
  }
+ if (Object.hasOwn(parsed, "cronSafetyModules") && (
+  !Array.isArray(parsed.cronSafetyModules) || parsed.cronSafetyModules.length !== 2 ||
+  parsed.cronSafetyModules.some((module) => !isRecord(module) ||
+   Object.keys(module).sort().join(",") !== "path,sha256" ||
+   !isAbsoluteNormalizedPath(module.path) || !module.path.startsWith("/app/dist/")) ||
+  new Set(parsed.cronSafetyModules.map((module) => module.path)).size !== 2
+ )) refuse("record");
  return parsed;
 }
 
@@ -184,6 +195,7 @@ async function loadRuntime(record) {
  await Promise.all([
   hashStableRuntimeArtifact(record.adapterPath, record.adapterSha256),
   hashStableRuntimeArtifact(record.sourceModulePath, record.sourceModuleSha256),
+  ...(record.cronSafetyModules ?? []).map((module) => hashStableRuntimeArtifact(module.path, module.sha256)),
  ]);
 
  let adapter;
@@ -193,7 +205,11 @@ async function loadRuntime(record) {
   refuse("runtime");
  }
  const exports = Object.keys(adapter).sort();
- if (exports.length !== 1 || exports[0] !== REQUIRED_ADAPTER_EXPORT || typeof adapter[REQUIRED_ADAPTER_EXPORT] !== "function") {
+ if (
+  ![REQUIRED_ADAPTER_EXPORT, [REQUIRED_ADAPTER_EXPORT, OPTIONAL_ADAPTER_EXPORT, CRON_GUARD_EXPORT].sort().join(",")].includes(exports.join(",")) ||
+  Object.hasOwn(adapter, OPTIONAL_ADAPTER_EXPORT) !== Object.hasOwn(record, "cronSafetyModules") ||
+  exports.some((name) => typeof adapter[name] !== "function")
+ ) {
   refuse("runtime");
  }
  return adapter;
@@ -261,6 +277,9 @@ function classifyLegacyRoster(config) {
   }
   refuse("roster");
  }
+ if (config.agents.ownership === "explicit" && typeof config.agents.defaults?.systemAgent?.agentId === "string") {
+  return { applicable: false };
+ }
  return { applicable: true, entries, ids };
 }
 
@@ -300,12 +319,12 @@ function pathKey(pathParts) {
  return pathParts.join("\u0000");
 }
 
-function assertInsertedPaths(insertedPaths) {
+function assertInsertedPaths(insertedPaths, agentId = "main") {
  if (!Array.isArray(insertedPaths)) {
   refuse("result");
  }
  const allowed = new Set([
-  pathKey(["agents", "entries", "main", "workspace"]),
+  pathKey(["agents", "entries", agentId, "workspace"]),
   pathKey(["bindings"]),
   ...[...ROLE_DEFAULT_KEYS].map((key) => pathKey(["agents", "defaults", key, "agentId"])),
   pathKey(["talk", "agentId"]),
@@ -324,7 +343,7 @@ function assertInsertedPaths(insertedPaths) {
  return seen;
 }
 
-function assertMaterializationResult(result) {
+function assertMaterializationResult(result, agentId = "main") {
  if (
   !isRecord(result) ||
   Object.keys(result).sort().join("\u0000") !== "config\u0000insertedPaths" ||
@@ -332,10 +351,10 @@ function assertMaterializationResult(result) {
  ) {
   refuse("result");
  }
- return { config: result.config, inserted: assertInsertedPaths(result.insertedPaths) };
+ return { config: result.config, inserted: assertInsertedPaths(result.insertedPaths, agentId) };
 }
 
-function assertMainEntry(beforeEntry, afterEntry, inserted, workspaceDir) {
+function assertOwnerEntry(beforeEntry, afterEntry, inserted, workspaceDir, agentId) {
  if (!isRecord(afterEntry)) {
   refuse("result");
  }
@@ -350,7 +369,7 @@ function assertMainEntry(beforeEntry, afterEntry, inserted, workspaceDir) {
   }
  }
 
- const workspacePath = pathKey(["agents", "entries", "main", "workspace"]);
+ const workspacePath = pathKey(["agents", "entries", agentId, "workspace"]);
  if (inserted.has(workspacePath)) {
   const prior = beforeEntry.workspace;
   if (prior !== undefined && !(typeof prior === "string" && prior.trim().length === 0)) {
@@ -364,7 +383,7 @@ function assertMainEntry(beforeEntry, afterEntry, inserted, workspaceDir) {
  }
 }
 
-function assertDefaultTarget(beforeValue, afterValue, inserted, key) {
+function assertDefaultTarget(beforeValue, afterValue, inserted, key, agentId) {
  const insertedPath = pathKey(["agents", "defaults", key, "agentId"]);
  if (!inserted.has(insertedPath)) {
   if (!isDeepStrictEqual(beforeValue, afterValue)) {
@@ -372,7 +391,7 @@ function assertDefaultTarget(beforeValue, afterValue, inserted, key) {
   }
   return;
  }
- if (!isRecord(afterValue) || afterValue.agentId !== "main") {
+ if (!isRecord(afterValue) || afterValue.agentId !== agentId || Object.hasOwn(beforeValue ?? {}, "agentId")) {
   refuse("result");
  }
  if (beforeValue !== undefined && !isRecord(beforeValue)) {
@@ -397,7 +416,7 @@ function isTelegramWildcard(binding) {
  return binding.match.channel === "telegram" && binding.match.accountId === "*";
 }
 
-function assertBindings(before, after, inserted) {
+function assertBindings(before, after, inserted, agentId) {
  const beforeBindings = before ?? [];
  if (!Array.isArray(after) || after.length < beforeBindings.length) {
   refuse("result");
@@ -417,7 +436,7 @@ function assertBindings(before, after, inserted) {
   if (
    !isRecord(binding) ||
    Object.keys(binding).sort().join("\u0000") !== "agentId\u0000match" ||
-   binding.agentId !== "main" ||
+   binding.agentId !== agentId ||
    !isRecord(binding.match) ||
    Object.keys(binding.match).sort().join("\u0000") !== "accountId\u0000channel" ||
    binding.match.accountId !== "*" ||
@@ -435,10 +454,10 @@ function assertBindings(before, after, inserted) {
  }
 }
 
-function assertTalk(before, after, inserted) {
+function assertTalk(before, after, inserted, agentId) {
  const insertedPath = pathKey(["talk", "agentId"]);
  if (before === undefined) {
-  if (!inserted.has(insertedPath) || !isRecord(after) || after.agentId !== "main" || Object.keys(after).length !== 1) {
+  if (!inserted.has(insertedPath) || !isRecord(after) || after.agentId !== agentId || Object.keys(after).length !== 1) {
    refuse("result");
   }
   return;
@@ -452,7 +471,7 @@ function assertTalk(before, after, inserted) {
   }
   return;
  }
- if (Object.hasOwn(before, "agentId") || after.agentId !== "main") {
+ if (Object.hasOwn(before, "agentId") || after.agentId !== agentId) {
   refuse("result");
  }
  for (const key of Object.keys(before)) {
@@ -467,7 +486,7 @@ function assertTalk(before, after, inserted) {
  }
 }
 
-function assertMaterializedConfig(before, after, inserted, workspaceDir) {
+function assertMaterializedConfig(before, after, inserted, workspaceDir, agentId = "main") {
  const allowedRootChanges = new Set(["agents", "bindings", "talk"]);
  for (const key of Object.keys(before)) {
   if (!allowedRootChanges.has(key) && !isDeepStrictEqual(before[key], after[key])) {
@@ -505,8 +524,8 @@ function assertMaterializedConfig(before, after, inserted, workspaceDir) {
   if (!Object.hasOwn(afterEntries, key)) {
    refuse("result");
   }
-  if (key === "main") {
-   assertMainEntry(beforeEntries.main, afterEntries.main, inserted, workspaceDir);
+  if (key === agentId) {
+   assertOwnerEntry(beforeEntries[key], afterEntries[key], inserted, workspaceDir, agentId);
   } else if (!isDeepStrictEqual(beforeEntries[key], afterEntries[key])) {
    refuse("result");
   }
@@ -524,7 +543,7 @@ function assertMaterializedConfig(before, after, inserted, workspaceDir) {
  const defaultsAfter = afterDefaults ?? {};
  for (const key of Object.keys(defaultsBefore)) {
   if (ROLE_DEFAULT_KEYS.has(key)) {
-   assertDefaultTarget(defaultsBefore[key], defaultsAfter[key], inserted, key);
+   assertDefaultTarget(defaultsBefore[key], defaultsAfter[key], inserted, key, agentId);
   } else if (!isDeepStrictEqual(defaultsBefore[key], defaultsAfter[key])) {
    refuse("result");
   }
@@ -534,12 +553,12 @@ function assertMaterializedConfig(before, after, inserted, workspaceDir) {
    if (!ROLE_DEFAULT_KEYS.has(key)) {
     refuse("result");
    }
-   assertDefaultTarget(undefined, defaultsAfter[key], inserted, key);
+   assertDefaultTarget(undefined, defaultsAfter[key], inserted, key, agentId);
   }
  }
 
- assertBindings(before.bindings, after.bindings, inserted);
- assertTalk(before.talk, after.talk, inserted);
+ assertBindings(before.bindings, after.bindings, inserted, agentId);
+ assertTalk(before.talk, after.talk, inserted, agentId);
 }
 
 function serializeConfig(config) {
@@ -732,7 +751,72 @@ async function publishValidatedConfig(runtimePaths, original, bytes) {
  }
 }
 
+async function retireDefaultMarkers(adapter, runtimePaths) {
+ const chunks = [];
+ let length = 0;
+ for await (const chunk of process.stdin) {
+  length += chunk.length;
+  if (length > CONFIG_MAX_BYTES) refuse("config");
+  chunks.push(chunk);
+ }
+ const config = JSON.parse(utf8Decoder.decode(Buffer.concat(chunks)));
+ if (!isRecord(config) || !isRecord(config.agents?.entries)) refuse("roster");
+ const entries = config.agents.entries;
+ const ids = Object.keys(entries);
+ if (!ids.every((id) => isAgentId(id) && isRecord(entries[id]) &&
+  (!Object.hasOwn(entries[id], "default") || typeof entries[id].default === "boolean"))) refuse("roster");
+ const marked = ids.filter((id) => entries[id].default === true);
+ if (marked.length > 1 || (marked.length > 0 && config.agents.ownership !== undefined)) refuse("roster");
+ if (!adapter.retireLegacyAgentDefaultMarkers) return JSON.stringify({ config, paths: [] });
+ const expected = structuredClone(config);
+ const paths = [];
+ for (const id of ids) {
+  if (Object.hasOwn(expected.agents.entries[id], "default")) {
+   delete expected.agents.entries[id].default;
+   paths.push("agents.entries.*.default");
+  }
+ }
+ const owner = ids.length > 1 ? marked[0] : undefined;
+ const retired = adapter.retireLegacyAgentDefaultMarkers(config);
+ if (!isRecord(retired) || retired.agentCount !== ids.length || retired.legacyOwner !== owner ||
+  !isDeepStrictEqual(retired.config, expected)) refuse("result");
+ let next = retired.config;
+ if (owner) {
+  validateFieldConfig(next, { entries: next.agents.entries });
+  const options = { ambientChannelIds: ["telegram"], env: process.env, materializeSessionStore: true, materializeWorkspace: true };
+  const materialized = adapter.materializeLegacyDefaultAgentRoles(next, owner, options);
+  const result = assertMaterializationResult(materialized, owner);
+  const workspace = next.agents.defaults?.workspace;
+  const expectedWorkspace = typeof workspace === "string" && workspace.trim() ? workspace.trim() : runtimePaths.workspaceDir;
+  assertMaterializedConfig(next, result.config, result.inserted, expectedWorkspace, owner);
+  const idempotent = assertMaterializationResult(adapter.materializeLegacyDefaultAgentRoles(result.config, owner, options), owner);
+  if (idempotent.inserted.size !== 0 || !isDeepStrictEqual(idempotent.config, result.config)) refuse("result");
+  next = result.config;
+  for (const inserted of materialized.insertedPaths) {
+   paths.push(inserted.map((part, index) => index === 2 && inserted[0] === "agents" && inserted[1] === "entries" ? "*" : part).join("."));
+  }
+ }
+ if (ids.length > 1 && next.agents.ownership === undefined) {
+  next.agents.ownership = "explicit";
+  paths.push("agents.ownership");
+ }
+ if (marked.length > 0) {
+  // Authored templates are not resolved cron partitions, including escaped forms.
+  if (typeof config.cron?.store === "string" && config.cron.store.includes("${")) refuse("cron-ownership");
+  try {
+   const checked = await adapter.assertLegacyCronOwnershipBeforeConfigWrite(config, next, process.env);
+   if (!Array.isArray(checked) || checked.length !== 0) refuse("cron-ownership");
+  } catch {
+   refuse("cron-ownership");
+  }
+ }
+ return JSON.stringify({ config: next, paths: [...new Set(paths)] });
+}
+
 async function main() {
+ if (process.argv.length === 3 && process.argv[2] === "--retire-default-markers") {
+  return retireDefaultMarkers(await loadRuntime(await readRuntimeRecord()), resolveRuntimePaths());
+ }
  const dryRun = process.argv.length === 3 && process.argv[2] === "--dry-run";
  if (!dryRun && process.argv.length !== 2) {
   refuse("arguments");

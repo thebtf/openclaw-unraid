@@ -7,8 +7,10 @@ import { pathToFileURL } from "node:url";
 import { TextDecoder } from "node:util";
 
 const REQUIRED_EXPORT = "materializeLegacyDefaultAgentRoles";
+const OPTIONAL_EXPORT = "retireLegacyAgentDefaultMarkers";
+const CRON_GUARD_EXPORT = "assertLegacyCronOwnershipBeforeConfigWrite";
 const ADAPTER_BASENAME = "openclaw-unraid-default-agent-roles-adapter.mjs";
-const CHUNK_FILENAME = /^legacy\.roster-[A-Za-z0-9_-]+\.js$/;
+const CHUNK_FILENAME = /^legacy(?:\.roster)?-[A-Za-z0-9_-]+\.(?:mjs|js)$/;
 const RECORD_VERSION = 1;
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -30,7 +32,7 @@ function hasExactlyOneNamedFunctionDeclaration(source, name) {
   return [...source.matchAll(declaration)].length === 1;
 }
 
-function patchModuleExports(source) {
+function patchModuleExports(source, cronSafetyModules) {
   const terminalExport = /^(?<body>[\s\S]*?)(?<separator>(?:^|[;\n])\s*)export\s*\{(?<members>[^{}]*)\};?\s*$/;
   const match = terminalExport.exec(source);
   if (!match?.groups) {
@@ -58,7 +60,16 @@ function patchModuleExports(source) {
 
   return [
     `${match.groups.body}${match.groups.separator}`.trimEnd(),
-    `export { ${REQUIRED_EXPORT} };`,
+    ...(cronSafetyModules.length === 0 ? [] : [
+      `import { ${cronSafetyModules[0].exportedName} as unraidCronOwnerGuard } from ${JSON.stringify(`./${path.basename(cronSafetyModules[0].sourceModulePath)}`)};`,
+      `import { ${cronSafetyModules[1].exportedName} as unraidArtifactPreservingStateReads } from ${JSON.stringify(`./${path.basename(cronSafetyModules[1].sourceModulePath)}`)};`,
+      `async function ${CRON_GUARD_EXPORT}(sourceConfig, nextConfig, env) {`,
+      "  return unraidArtifactPreservingStateReads(() => unraidCronOwnerGuard({",
+      "    env, nextConfig, snapshot: { sourceConfigBeforeMigrations: sourceConfig, sourceConfig, parsed: sourceConfig, config: sourceConfig },",
+      "  }), { agentDatabases: true });",
+      "}",
+    ]),
+    `export { ${[REQUIRED_EXPORT, ...(cronSafetyModules.length === 0 ? [] : [OPTIONAL_EXPORT, CRON_GUARD_EXPORT])].join(", ")} };`,
     "",
   ].join("\n");
 }
@@ -92,6 +103,26 @@ async function findDefaultAgentRolesModule(distDir) {
   return candidates[0];
 }
 
+async function findNamedFunctionModule(distDir, prefix, functionName) {
+  const candidates = [];
+  for (const entry of await fs.readdir(distDir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.startsWith(`${prefix}-`) || !/\.(?:mjs|js)$/.test(entry.name)) continue;
+    const sourceModulePath = path.join(distDir, entry.name);
+    const sourceBytes = await fs.readFile(sourceModulePath);
+    const source = utf8Decoder.decode(sourceBytes);
+    if (!hasExactlyOneNamedFunctionDeclaration(source, functionName)) continue;
+    const terminal = /(?:^|\n)export\s*\{(?<members>[^{}]*)\};?\s*$/.exec(source);
+    const mapping = terminal?.groups?.members.match(new RegExp(String.raw`(?:^|,)\s*${functionName}(?:\s+as\s+([A-Za-z_$][\w$]*))?\s*(?=,|$)`));
+    if (!mapping) continue;
+    const exportedName = mapping[1] ?? functionName;
+    const namespace = await import(moduleUrl(sourceModulePath));
+    if (typeof namespace[exportedName] !== "function") continue;
+    candidates.push({ sourceModulePath, sourceBytes, exportedName });
+  }
+  if (candidates.length !== 1) throw new BuildContractError(`expected exactly one OpenClaw ${functionName} module`);
+  return candidates[0];
+}
+
 async function writeNewFile(filePath, contents, mode) {
   const handle = await fs.open(filePath, "wx", mode);
   try {
@@ -111,16 +142,21 @@ async function main() {
   const distDir = path.resolve(distDirArgument);
   const recordPath = path.resolve(recordPathArgument);
   const sourceModule = await findDefaultAgentRolesModule(distDir);
+  const cronSafetyModules = hasExactlyOneNamedFunctionDeclaration(sourceModule.source, OPTIONAL_EXPORT)
+    ? await Promise.all([
+      findNamedFunctionModule(distDir, "legacy-owner", "repairLegacyCronOwnersBeforeConfigWrite"),
+      findNamedFunctionModule(distDir, "artifact-preserving-state-reads", "withArtifactPreservingStateReads"),
+    ])
+    : [];
   const adapterPath = path.join(path.dirname(sourceModule.sourceModulePath), ADAPTER_BASENAME);
-  const adapterSource = patchModuleExports(sourceModule.source);
+  const adapterSource = patchModuleExports(sourceModule.source, cronSafetyModules);
 
   await writeNewFile(adapterPath, adapterSource, 0o644);
   const adapter = await import(moduleUrl(adapterPath));
   const adapterExports = Object.keys(adapter).sort();
   if (
-    adapterExports.length !== 1 ||
-    adapterExports[0] !== REQUIRED_EXPORT ||
-    typeof adapter[REQUIRED_EXPORT] !== "function"
+    adapterExports.join(",") !== [REQUIRED_EXPORT, ...(cronSafetyModules.length === 0 ? [] : [OPTIONAL_EXPORT, CRON_GUARD_EXPORT])].sort().join(",") ||
+    adapterExports.some((name) => typeof adapter[name] !== "function")
   ) {
     throw new BuildContractError("generated default-agent roles adapter has an unexpected export shape");
   }
@@ -132,6 +168,12 @@ async function main() {
     adapterSha256: sha256(adapterSource),
     sourceModulePath: sourceModule.sourceModulePath,
     sourceModuleSha256: sha256(sourceModule.sourceBytes),
+    ...(cronSafetyModules.length === 0 ? {} : {
+      cronSafetyModules: cronSafetyModules.map((module) => ({
+        path: module.sourceModulePath,
+        sha256: sha256(module.sourceBytes),
+      })),
+    }),
   };
   await writeNewFile(recordPath, `${JSON.stringify(record)}\n`, 0o644);
   process.stdout.write("openclaw default-agent roles adapter ready\n");

@@ -381,7 +381,7 @@ exec_gateway() {
 # Native validation is authoritative. The migrator only handles the exact
 # v2026.8.1 legacy and partial shapes it can plan without reading values.
 plan_supported_migration() {
-  if ! MIGRATION_PLAN=$(run_as_puid python3 /usr/local/bin/migrate-openclaw-2-config.py --config "$CFG"); then
+  if ! MIGRATION_PLAN=$(run_as_puid python3 /usr/local/bin/migrate-openclaw-2-config.py --config "$CFG" --retire-default-markers); then
     echo "[bootstrap] FATAL: existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape. It was left byte-identical and no migration backup was created. Preserve openclaw.json and recover it manually; do not run broad doctor --fix as an automatic upgrade step. Refusing managed writes." 1>&2
     return 1
   fi
@@ -418,7 +418,7 @@ preflight_supported_migration() {
     return 1
   fi
 
-  if ! CANDIDATE_MIGRATION_RESULT=$(run_as_puid_with_home "$MIGRATION_CANDIDATE_HOME" python3 /usr/local/bin/migrate-openclaw-2-config.py --config "$MIGRATION_CANDIDATE_CFG" --apply 2>&1); then
+  if ! CANDIDATE_MIGRATION_RESULT=$(run_as_puid_with_home "$MIGRATION_CANDIDATE_HOME" python3 /usr/local/bin/migrate-openclaw-2-config.py --config "$MIGRATION_CANDIDATE_CFG" --retire-default-markers --apply 2>&1); then
     candidate_preflight_failed "existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape."
     return 1
   fi
@@ -436,6 +436,20 @@ preflight_supported_migration() {
     candidate_preflight_failed "candidate migration failed native OpenClaw validation."
     return 1
   fi
+  # Unsafe workspace sources must not become eligible for a real config write.
+  if ! run_as_puid node /usr/local/bin/migrate-openclaw-legacy-workspaces.mjs --preflight-config "$MIGRATION_CANDIDATE_CFG" >/dev/null 2>&1; then
+    echo "[bootstrap] workspace-migration: refused" 1>&2
+    candidate_preflight_failed "workspace migration refused; legacy workspace sources were left for manual recovery."
+    return 1
+  fi
+  if ! SESSION_PREFLIGHT_RESULT=$(run_as_puid env OPENCLAW_CONFIG_PATH="$MIGRATION_CANDIDATE_CFG" node /usr/local/bin/migrate-openclaw-legacy-sessions.mjs --preflight); then
+    case "$SESSION_PREFLIGHT_RESULT" in
+      'session-migration: failed code='*' status='*) echo "[bootstrap] $SESSION_PREFLIGHT_RESULT" 1>&2 ;;
+      *) echo "[bootstrap] session-migration: failed code=entrypoint-status status=unknown" 1>&2 ;;
+    esac
+    candidate_preflight_failed "session migration preflight refused; legacy session sources were left for manual recovery."
+    return 1
+  fi
   if ! cleanup_migration_candidate; then
     echo "[bootstrap] FATAL: temporary migration candidate cleanup failed. The real config was left byte-identical and no migration backup was created. Refusing managed writes." 1>&2
     return 1
@@ -445,7 +459,7 @@ preflight_supported_migration() {
 }
 
 apply_supported_migration() {
-  if ! MIGRATION_RESULT=$(run_as_puid python3 /usr/local/bin/migrate-openclaw-2-config.py --config "$CFG" --apply); then
+  if ! MIGRATION_RESULT=$(run_as_puid python3 /usr/local/bin/migrate-openclaw-2-config.py --config "$CFG" --retire-default-markers --apply); then
     echo "[bootstrap] FATAL: supported OpenClaw v2026.8.1 migration could not complete atomically. Inspect the migrator output and any printed backup path, then recover manually. Refusing managed writes." 1>&2
     exit 1
   fi
