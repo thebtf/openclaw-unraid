@@ -53,6 +53,25 @@ function reportDetectionFailure(error) {
  process.stderr.write(`exec-approvals-detection: type=${name} code=${code} frames=${frames.join(",") || "none"}\n`);
 }
 
+async function detectWithNamespaceWait(adapter, parameters) {
+ // A stopped container can leave a fresh 90-second heartbeat in another PID namespace.
+ const deadline = performance.now() + 95_000;
+ let waiting = false;
+ for (; ;) {
+  try {
+   return await adapter.detectLegacyExecApprovals(parameters);
+  } catch (error) {
+   const remaining = deadline - performance.now();
+   if (error?.name !== "GatewayLockNamespaceError" || remaining <= 0) throw error;
+   if (!waiting) {
+    process.stderr.write("[bootstrap] exec-approvals-migration: waiting for prior Gateway namespace heartbeat\n");
+    waiting = true;
+   }
+   await new Promise((resolve) => setTimeout(resolve, Math.min(1000, remaining)));
+  }
+ }
+}
+
 function isRecord(value) {
  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -562,7 +581,7 @@ async function main() {
 
  let detected;
  try {
-  detected = await adapter.detectLegacyExecApprovals(detectionParameters);
+  detected = await detectWithNamespaceWait(adapter, detectionParameters);
  } catch (error) {
   reportDetectionFailure(error);
   refuse("detection");
