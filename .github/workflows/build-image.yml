@@ -1599,18 +1599,18 @@ jobs:
             '
           # Seed canonical session state using a private current-schema view;
           # the original persisted legacy config remains the later upgrade input.
-          if ! docker run --rm --user 1000:1000 --entrypoint /bin/sh \
+          if ! docker run --rm -i --user 1000:1000 --entrypoint /bin/sh \
             -v "$session_volume:/home/node/.openclaw" \
-            -v "$session_fixture_dir:/fixtures:ro" \
             "$DERIVED_IMAGE:smoke" -ceu '
               candidate_dir=$(mktemp -d)
               trap '\''rm -rf "$candidate_dir"'\'' EXIT
+              cat > "$candidate_dir/fixture-openclaw.json"
               cp /home/node/.openclaw/openclaw.json "$candidate_dir/openclaw.json"
               python3 /usr/local/bin/migrate-openclaw-2-config.py --config "$candidate_dir/openclaw.json" --retire-default-markers --apply >/dev/null
-              cmp -s /home/node/.openclaw/openclaw.json /fixtures/openclaw.json
+              cmp -s /home/node/.openclaw/openclaw.json "$candidate_dir/fixture-openclaw.json"
               OPENCLAW_CONFIG_PATH="$candidate_dir/openclaw.json" node /app/dist/index.js doctor --session-sqlite import --session-sqlite-all-agents --json
-              cmp -s /home/node/.openclaw/openclaw.json /fixtures/openclaw.json
-            ' \
+              cmp -s /home/node/.openclaw/openclaw.json "$candidate_dir/fixture-openclaw.json"
+            ' < "$session_fixture_dir/openclaw.json" \
             > "$session_fixture_dir/seed-report.json" 2> "$session_fixture_dir/seed-error.log"; then
             echo "SESSION STORE UPGRADE SMOKE FAIL: public seed importer did not complete" 1>&2
             exit 1
