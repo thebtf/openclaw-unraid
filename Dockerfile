@@ -60,6 +60,10 @@ RUN npm install -g mcporter && mcporter --version && rm -rf /home/node/.npm
 ENTRYPOINT ["tini", "-s", "--", "/usr/local/bin/unraid-entrypoint.sh"]
 CMD []
 
+# The upstream probe can open state before Gateway startup; it must share its UID.
+HEALTHCHECK --interval=3m --timeout=10s --start-period=15s --retries=3 \
+  CMD setpriv --reuid="${PUID:-99}" --regid="${PGID:-100}" --init-groups node /app/dist/docker-healthcheck.js
+
 LABEL org.opencontainers.image.title="OpenClaw for Unraid" \
   org.opencontainers.image.source="https://github.com/thebtf/openclaw-unraid" \
   org.opencontainers.image.description="OpenClaw gateway with Unraid PUID/PGID support and first-boot config seeding" \
