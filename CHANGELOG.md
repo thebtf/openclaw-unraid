@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **FUSE media saving.** Adds the audited downstream media adapter to normal image builds and a digest-pinned `Dockerfile.media-hotfix` for the published OpenClaw 2026.10.8 base. Target-pin transfer before source unlink preserves completed media on FUSE while retaining identity, containment and no-overwrite checks, native-off support, and completed-output recovery when target-pin opening fails. Unknown dependency or guarded-caller bytes refuse the build pending audit. Synthetic local Docker regressions cover the real media save/read path, a 319,700-byte PDF, real bindfs FUSE, native-off mode and injected `EMFILE`; this does not claim Telegram or live Unraid verification.
+- **Tested-image publication.** The image workflow requires the synthetic media suites on calibrated real bindfs FUSE as UID 1026:GID 100 before registry login; missing FUSE fails closed. Only the test sources enter the disposable container, with no host mounts or checkout/registry credentials. Publication tags and pushes the captured local candidate image ID instead of rebuilding. A pinned upstream-tag build publishes only that tag; `latest` changes only when selected. Workflow runs share one serialized publication lane.
+
 - **OpenClaw 2.0 compatibility.** Removed the retired browser authentication environment setting, pinned container state to `/home/node/.openclaw`, the workspace to `/home/node/.openclaw/workspace`, and local tools to `/home/node/.local`, and migrated the documentation to the derived image and signed browser device pairing.
 
 - **OpenClaw 2.0 migration warning.** Sessions and transcripts migrate to SQLite. Make a verified backup before upgrading. Before downgrading, use the current OpenClaw CLI to restore archived legacy transcript artifacts. See [OpenClaw's Updating guide](https://docs.openclaw.ai/install/updating).

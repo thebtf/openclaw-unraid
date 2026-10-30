@@ -1,0 +1,5 @@
+FROM ghcr.io/thebtf/openclaw-unraid@sha256:8591952f740fa9c1a3a3645f775ea484529b724c5a296678c440f0277e3da375
+USER root
+COPY scripts/build-openclaw-media-fuse-adapter.mjs /usr/local/lib/build-openclaw-media-fuse-adapter.mjs
+RUN node /usr/local/lib/build-openclaw-media-fuse-adapter.mjs /app /usr/local/lib/openclaw-unraid-media-fuse.json
+LABEL org.opencontainers.image.base.digest="sha256:8591952f740fa9c1a3a3645f775ea484529b724c5a296678c440f0277e3da375"
