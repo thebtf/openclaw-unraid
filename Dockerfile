@@ -40,6 +40,7 @@ COPY scripts/migrate-openclaw-2-config.py /usr/local/bin/migrate-openclaw-2-conf
 COPY scripts/build-openclaw-workspace-migration-adapter.mjs /usr/local/lib/build-openclaw-workspace-migration-adapter.mjs
 COPY scripts/build-openclaw-exec-approvals-migration-adapter.mjs /usr/local/lib/build-openclaw-exec-approvals-migration-adapter.mjs
 COPY scripts/build-openclaw-default-agent-roles-adapter.mjs /usr/local/lib/build-openclaw-default-agent-roles-adapter.mjs
+COPY scripts/build-openclaw-media-fuse-adapter.mjs /usr/local/lib/build-openclaw-media-fuse-adapter.mjs
 COPY scripts/migrate-openclaw-legacy-workspaces.mjs /usr/local/bin/migrate-openclaw-legacy-workspaces.mjs
 COPY scripts/migrate-openclaw-exec-approvals.mjs /usr/local/bin/migrate-openclaw-exec-approvals.mjs
 COPY scripts/materialize-legacy-default-agent-roles.mjs /usr/local/bin/materialize-legacy-default-agent-roles.mjs
@@ -47,6 +48,7 @@ COPY scripts/migrate-openclaw-legacy-sessions.mjs /usr/local/bin/migrate-opencla
 RUN node /usr/local/lib/build-openclaw-workspace-migration-adapter.mjs /app/dist /usr/local/lib/openclaw-unraid-workspace-migration.json && \
   node /usr/local/lib/build-openclaw-exec-approvals-migration-adapter.mjs /app/dist /usr/local/lib/openclaw-unraid-exec-approvals-migration.json && \
   node /usr/local/lib/build-openclaw-default-agent-roles-adapter.mjs /app/dist /usr/local/lib/openclaw-unraid-default-agent-roles.json && \
+  node /usr/local/lib/build-openclaw-media-fuse-adapter.mjs /app /usr/local/lib/openclaw-unraid-media-fuse.json && \
   chmod 755 /usr/local/bin/unraid-entrypoint.sh /usr/local/bin/migrate-openclaw-2-config.py /usr/local/bin/migrate-openclaw-legacy-workspaces.mjs /usr/local/bin/migrate-openclaw-exec-approvals.mjs /usr/local/bin/materialize-legacy-default-agent-roles.mjs /usr/local/bin/migrate-openclaw-legacy-sessions.mjs
 
 # mcporter: MCP-client CLI consumed by the bundled `mcporter` skill

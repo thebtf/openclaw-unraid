@@ -3,5 +3,9 @@
 *.sh text eol=lf
 *.py text eol=lf
 Dockerfile text eol=lf
+Dockerfile.media-hotfix text eol=lf
+scripts/build-openclaw-media-fuse-adapter.mjs text eol=lf
+scripts/fixtures/media-*.mjs text eol=lf
+scripts/fixtures/image-publication-regression.mjs text eol=lf
 *.yml text eol=lf
 *.xml text eol=lf

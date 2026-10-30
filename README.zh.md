@@ -318,14 +318,13 @@ NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Ho
 
 ## 更新升级<a id="updating"></a>
 
-**通过 Unraid Docker UI：**
-1. Docker 标签页 → 点击 OpenClaw 图标 → Check for Updates → Apply
+> **更新前：** 备份并验证绑定挂载中的数据。保存挂载之外仍需保留的数据，或保留旧容器可写层的可恢复副本。在 Unraid 中应用更新会重新创建容器并删除其旧可写层；绑定挂载不会保留仅存放在该层中的文件。
 
-**通过命令行：**
-```bash
-docker pull ghcr.io/thebtf/openclaw-unraid:latest
-docker restart OpenClaw
-```
+**保存数据后，通过 Unraid Docker UI 更新：**
+1. 在 **Docker** 标签页点击 **Check for Updates**，然后点击 OpenClaw 旁的 **apply update** 并确认。Unraid 会使用已保存的模板设置，以更新后的镜像重新创建容器。
+
+`docker pull` 只下载镜像。`docker restart` 使用原有镜像重启现有容器；先拉取再重启并不会安装更新。
+
 保持 **Config Migration** 的默认值 `auto`，然后执行一次正常镜像更新。镜像首先只处理确切受支持的 OpenClaw 2026.8.1 legacy 或 partial **配置**形态：它迁移逐字节一致的私有临时副本，用真实的 OpenClaw CLI 验证该候选副本，然后在相邻位置创建逐字节一致的备份并原子地应用真实迁移。当前配置不会被修改，也不会创建备份。
 
 配置候选副本失败属于配置迁移失败，而不是工作区迁移拒绝：真实配置保持逐字节不变，不会创建配置迁移备份，且托管写入会停止。其受限的 fatal 类别为：
