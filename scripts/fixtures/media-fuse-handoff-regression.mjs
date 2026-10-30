@@ -361,8 +361,11 @@ try {
     if (!realFuseRoot) {
       assert.equal(observed.unlinkCalls, 1, 'source must be retired');
       assert.equal(observed.sourceCloses, 1, 'source descriptor must be closed');
+      absent(path.join(f.sourceDir, '.fuse_hidden_fixture'));
+    } else {
+      assert.deepEqual(fs.readdirSync(f.sourceDir).filter((name) => name.startsWith('.fuse_hidden')), [],
+        'real FUSE hidden source must be released after handoff');
     }
-    absent(path.join(f.sourceDir, '.fuse_hidden_fixture'));
     bytesAt(f.targetPath, payload);
     return { observed, target: identity(fs.lstatSync(f.targetPath, { bigint: true })) };
   });
