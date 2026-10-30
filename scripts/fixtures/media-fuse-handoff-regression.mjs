@@ -88,10 +88,11 @@ function deferredUnlinkBoundary(fixture) {
   const opened = new Set();
   const retired = new Set();
   const hiddenPath = path.join(fixture.sourceDir, '.fuse_hidden_fixture');
-  const observations = { unlinkCalls: 0, deferredUnlinks: 0, sourceCloses: 0, hiddenReleased: 0 };
+  const observations = { unlinkCalls: 0, sourceDescriptorsAtUnlink: [], deferredUnlinks: 0, sourceCloses: 0, hiddenReleased: 0 };
   // Count the new native unlink ABI without replacing its real operation.
   nativeBinding.removeStagedFile = (...args) => {
     observations.unlinkCalls++;
+    observations.sourceDescriptorsAtUnlink.push(opened.size);
     return originalRemoveStagedFile.apply(nativeBinding, args);
   };
   fsp.open = async function(file, ...args) {
@@ -115,6 +116,7 @@ function deferredUnlinkBoundary(fixture) {
   fs.unlinkSync = function(file) {
     if (String(file) !== fixture.sourcePath) return original.unlink(file);
     observations.unlinkCalls++;
+    observations.sourceDescriptorsAtUnlink.push(opened.size);
     if (opened.size === 0) return original.unlink(file);
     // A real rename holds the inode and hidden hardlink; no handoff result is forged.
     fs.renameSync(file, hiddenPath);
@@ -232,7 +234,13 @@ try {
       bytesAt(f.targetPath, payload);
     } finally { await handle.close(); }
     assert.equal(fs.lstatSync(f.targetPath, { bigint: true }).nlink, 1n);
-    if (!realFuseRoot) assert.equal(observed.hiddenReleased, 1);
+    if (!realFuseRoot) {
+      assert.equal(observed.unlinkCalls, 1, 'calibration must unlink its open source once');
+      assert.deepEqual(observed.sourceDescriptorsAtUnlink, [1], 'calibration must retain an open source at unlink');
+      assert.equal(observed.deferredUnlinks, 1, 'calibration must defer source unlink');
+      assert.equal(observed.sourceCloses, 1, 'calibration must close its source once');
+      assert.equal(observed.hiddenReleased, 1, 'calibration must release its hidden source');
+    }
     observed.targetLinksAfterClose = String(fs.lstatSync(f.targetPath, { bigint: true }).nlink);
     assert.equal(fs.readdirSync(f.sourceDir).filter((name) => name.startsWith('.fuse_hidden')).length, 0);
     return { observed };
@@ -360,7 +368,10 @@ try {
     catch (error) { error.message += `; boundary=${JSON.stringify(observed)}`; throw error; }
     if (!realFuseRoot) {
       assert.equal(observed.unlinkCalls, 1, 'source must be retired');
+      assert.deepEqual(observed.sourceDescriptorsAtUnlink, [0], 'source must be closed before unlink');
       assert.equal(observed.sourceCloses, 1, 'source descriptor must be closed');
+      assert.equal(observed.deferredUnlinks, 0, 'handoff must prevent deferred source unlink');
+      assert.equal(observed.hiddenReleased, 0, 'handoff must not create a hidden source to release');
       absent(path.join(f.sourceDir, '.fuse_hidden_fixture'));
     } else {
       assert.deepEqual(fs.readdirSync(f.sourceDir).filter((name) => name.startsWith('.fuse_hidden')), [],
