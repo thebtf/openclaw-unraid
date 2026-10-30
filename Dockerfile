@@ -41,6 +41,9 @@ COPY scripts/build-openclaw-workspace-migration-adapter.mjs /usr/local/lib/build
 COPY scripts/build-openclaw-exec-approvals-migration-adapter.mjs /usr/local/lib/build-openclaw-exec-approvals-migration-adapter.mjs
 COPY scripts/build-openclaw-default-agent-roles-adapter.mjs /usr/local/lib/build-openclaw-default-agent-roles-adapter.mjs
 COPY scripts/build-openclaw-media-fuse-adapter.mjs /usr/local/lib/build-openclaw-media-fuse-adapter.mjs
+COPY scripts/build-openclaw-schema-migration-adapter.mjs /usr/local/lib/build-openclaw-schema-migration-adapter.mjs
+COPY scripts/migrate-openclaw-database-schemas.mjs /usr/local/bin/migrate-openclaw-database-schemas.mjs
+COPY scripts/openclaw-bootstrap-healthcheck.mjs /usr/local/bin/openclaw-bootstrap-healthcheck.mjs
 COPY scripts/migrate-openclaw-legacy-workspaces.mjs /usr/local/bin/migrate-openclaw-legacy-workspaces.mjs
 COPY scripts/migrate-openclaw-exec-approvals.mjs /usr/local/bin/migrate-openclaw-exec-approvals.mjs
 COPY scripts/materialize-legacy-default-agent-roles.mjs /usr/local/bin/materialize-legacy-default-agent-roles.mjs
@@ -48,6 +51,7 @@ COPY scripts/migrate-openclaw-legacy-sessions.mjs /usr/local/bin/migrate-opencla
 RUN node /usr/local/lib/build-openclaw-workspace-migration-adapter.mjs /app/dist /usr/local/lib/openclaw-unraid-workspace-migration.json && \
   node /usr/local/lib/build-openclaw-exec-approvals-migration-adapter.mjs /app/dist /usr/local/lib/openclaw-unraid-exec-approvals-migration.json && \
   node /usr/local/lib/build-openclaw-default-agent-roles-adapter.mjs /app/dist /usr/local/lib/openclaw-unraid-default-agent-roles.json && \
+  node /usr/local/lib/build-openclaw-schema-migration-adapter.mjs /app/dist /usr/local/lib/openclaw-unraid-schema-migration.json && \
   node /usr/local/lib/build-openclaw-media-fuse-adapter.mjs /app /usr/local/lib/openclaw-unraid-media-fuse.json && \
   chmod 755 /usr/local/bin/unraid-entrypoint.sh /usr/local/bin/migrate-openclaw-2-config.py /usr/local/bin/migrate-openclaw-legacy-workspaces.mjs /usr/local/bin/migrate-openclaw-exec-approvals.mjs /usr/local/bin/materialize-legacy-default-agent-roles.mjs /usr/local/bin/migrate-openclaw-legacy-sessions.mjs
 
@@ -62,9 +66,10 @@ RUN npm install -g mcporter && mcporter --version && rm -rf /home/node/.npm
 ENTRYPOINT ["tini", "-s", "--", "/usr/local/bin/unraid-entrypoint.sh"]
 CMD []
 
-# The upstream probe can open state before Gateway startup; it must share its UID.
+# Native port resolution can migrate state; admit it only after bootstrap.
+# The container-local marker must match the current gateway process generation.
 HEALTHCHECK --interval=3m --timeout=10s --start-period=15s --retries=3 \
-  CMD setpriv --reuid="${PUID:-99}" --regid="${PGID:-100}" --init-groups node /app/dist/docker-healthcheck.js
+  CMD setpriv --reuid="${PUID:-99}" --regid="${PGID:-100}" --init-groups node /usr/local/bin/openclaw-bootstrap-healthcheck.mjs
 
 LABEL org.opencontainers.image.title="OpenClaw for Unraid" \
   org.opencontainers.image.source="https://github.com/thebtf/openclaw-unraid" \

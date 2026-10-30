@@ -333,6 +333,10 @@ NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Ho
 [bootstrap] FATAL: existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape.
 ```
 
+在工作区、会话或旧版 approvals 的 SQLite 导入之前，镜像通过构建时绑定的确切原生能力准备受支持的数据库 schema。原生维护所有权和经过验证的 `*.pre-startup-migration-*.bak` 快照组先覆盖全部已选现有数据库，然后共享 schema 15 和智能体 schema 19 才升级至原生目标 20/25。当前 schema 不作更改；schema 0 仅在原生分类器确认首次启动状态时放行。发行版本标签仅记录来源，并非无条件版本白名单：所需能力缺失或有歧义、目标 schema 类别改变都会拒绝构建。未知 schema、不安全或别名数据库路径、发现警告、含数据的已退役安全/历史表以及共享库自定义触发器都会拒绝自动迁移。镜像不会运行宽泛的 `doctor --fix`、手动修改 schema 或恢复原始投递行。
+
+备份前的工作区预检使用原生不观察运行状态的配置读取器。旧版 approvals 先验证并创建私有备份，其原生 SQLite 写入器等待 schema 准备完成。当前 bootstrap 到达 Gateway exec 前，Docker healthcheck 返回不健康且不读取状态；之后以 PUID:PGID 运行未修改的原生探针。容器本地进程代际标记以原子方式发布，并在重启时恢复。中断后仅复用同一组经过验证的全数据库原生快照；即使 schema 已提交，也先验证就绪状态，再通过原生函数完成待处理的备份清单。因此，后续会话预检拒绝时可能保留 SQLite 快照和 schema 清单，但真实配置和旧版会话源保持不变。遇到 `database-schema: refused code=<category>` 时，保留完整备份组和清单，停止竞争写入进程，查明该受限拒绝原因后再重试。缺失或改变的快照、改变的源身份、不完整或有歧义的组都会被拒绝，而非覆盖。`OPENCLAW_CONFIG_MIGRATION=dry-run` 不执行 schema 准备。
+
 在配置迁移和原生验证之后，镜像还会自动检查仅由上游 OpenClaw 导入器识别的每智能体 legacy 工作区设置状态。对于每个活动的已识别源，在调用上游仅工作区导入前，它都会验证名为 `<active-basename>.openclaw-2026.8.1-pre-migration.bak` 的逐字节一致相邻备份，输出 `workspace-migration: applied`，然后继续启动流程。如果没有剩余的 legacy 工作区设置状态，它会输出 `workspace-migration: no-op`；正常重启是幂等的，也不会创建第二个工作区备份。不需要宽泛的 `doctor --fix`，也不会自动运行它。
 在现有配置迁移和验证以及工作区迁移之后，镜像会保持 Gateway 停止，并运行 OpenClaw 的聚焦全智能体会话 SQLite 导入。在经过现场验证的迁移中，OpenClaw 仅在验证后才创建迁移清单并归档旧版会话文件。导入可能需要数分钟，并会压实大型现有 SQLite 数据库。
 
