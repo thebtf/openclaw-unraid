@@ -407,14 +407,12 @@ workspace-migration: refused
 
 Older containers may persist `OPENCLAW_CONFIG_MIGRATION=check`. It remains compatible, warns that it is deprecated, and then behaves exactly like `auto` so the normal update still completes. For an explicit inspection that makes no real config write and creates no backup, set `OPENCLAW_CONFIG_MIGRATION=dry-run`; it prints the narrow plan and refuses startup. Then restart with `auto`, which is the default. Set `OPENCLAW_CONFIG_MIGRATION=apply-v2026.8.1` only for an explicit advanced apply during recovery.
 
-**Via Unraid Docker UI:**
-1. Docker tab → Click OpenClaw icon → Check for Updates → Apply
+> **Before updating:** Back up and verify your bind-mounted data. Preserve any needed data outside mounts, or retain a recoverable copy of the old container's writable layer. Applying an update in Unraid recreates the container and removes its old writable layer; bind mounts do not preserve files stored only in that layer.
 
-**Via command line:**
-```bash
-docker pull ghcr.io/thebtf/openclaw-unraid:latest
-docker restart OpenClaw
-```
+**After preserving the data, update via Unraid Docker UI:**
+1. On the **Docker** tab, select **Check for Updates**, then select **apply update** for OpenClaw and confirm. Unraid recreates the container with the updated image using its saved template settings.
+
+`docker pull` only downloads an image. `docker restart` restarts the existing container with the same image; pulling and then restarting does not install the update.
 
 **When the template itself has changed** (new settings, image behavior, or mount layout) — Homebrew-style one-liner on the Unraid console:
 
