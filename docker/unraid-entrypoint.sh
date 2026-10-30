@@ -32,6 +32,10 @@
 
 set -eu
 
+# The native healthcheck resolves runtime config and can migrate old state.
+# Keep it out of all pre-backup/preflight phases, including container restarts.
+node /usr/local/bin/openclaw-bootstrap-healthcheck.mjs --reset
+
 # --- PUID/PGID resolution (LinuxServer.io convention) ---
 # Defaults: 99/100 = nobody/users on Unraid. Override via template fields.
 PUID="${PUID:-99}"
@@ -294,16 +298,10 @@ run_as_puid() {
   run_as_puid_with_home /home/node "$@"
 }
 
-# --- EXEC APPROVALS LEGACY STATE (PUID, before every config write) ---
-# The exact image-pinned upstream importer owns SQLite, receipts, exclusive
-# claims, and source retirement. This boundary creates a private verified
-# backup first and never prints approval data or raw upstream reports.
-# Config dry-run is globally inspection-only, so it must not invoke this
-# state-writing migration before the later config planning/refusal path.
-if [ "$CONFIG_MIGRATION_MODE" = "dry-run" ]; then
-  echo "[bootstrap] exec-approvals-migration: skipped (config dry-run)"
-else
-  if ! EXEC_APPROVALS_MIGRATION_RESULT=$(run_as_puid node /usr/local/bin/migrate-openclaw-exec-approvals.mjs); then
+# Validate and back up retired approvals before any config write, but defer
+# the native SQLite importer until schema readiness has its own DB snapshots.
+migrate_exec_approvals() {
+  if ! EXEC_APPROVALS_MIGRATION_RESULT=$(run_as_puid node /usr/local/bin/migrate-openclaw-exec-approvals.mjs "$@"); then
     case "$EXEC_APPROVALS_MIGRATION_RESULT" in
       'exec-approvals-migration: refused code='[a-z0-9-]*)
         echo "[bootstrap] $EXEC_APPROVALS_MIGRATION_RESULT" 1>&2
@@ -316,7 +314,12 @@ else
     exit 1
   fi
   case "$EXEC_APPROVALS_MIGRATION_RESULT" in
-    'exec-approvals-migration: no-op'|'exec-approvals-migration: applied')
+    'exec-approvals-migration: no-op')
+      if [ "${1:-}" != "--preflight" ]; then
+        echo "[bootstrap] $EXEC_APPROVALS_MIGRATION_RESULT"
+      fi
+      ;;
+    'exec-approvals-migration: applied'|'exec-approvals-migration: preflight')
       echo "[bootstrap] $EXEC_APPROVALS_MIGRATION_RESULT"
       ;;
     *)
@@ -325,6 +328,11 @@ else
       exit 1
       ;;
   esac
+}
+if [ "$CONFIG_MIGRATION_MODE" = "dry-run" ]; then
+  echo "[bootstrap] exec-approvals-migration: skipped (config dry-run)"
+else
+  migrate_exec_approvals --preflight
 fi
 
 # --- Ensure config file exists; openclaw config set requires it ---
@@ -364,18 +372,35 @@ trap 'cleanup_migration_candidate' 0
 candidate_preflight_failed() {
   message=$1
   if ! cleanup_migration_candidate; then
-    echo "[bootstrap] FATAL: temporary migration candidate cleanup failed. The real config was left byte-identical and no migration backup was created. Refusing managed writes." 1>&2
+    echo "[bootstrap] FATAL: temporary migration candidate cleanup failed. The real config was left byte-identical and no config-migration backup was created. Refusing managed writes." 1>&2
   else
-    echo "[bootstrap] FATAL: $message The real config was left byte-identical and no migration backup was created. Preserve openclaw.json and recover it manually; do not run broad doctor --fix as an automatic upgrade step. Refusing managed writes." 1>&2
+    echo "[bootstrap] FATAL: $message The real config was left byte-identical and no config-migration backup was created. Any verified SQLite schema snapshots were retained. Preserve openclaw.json and recover it manually; do not run broad doctor --fix as an automatic upgrade step. Refusing managed writes." 1>&2
   fi
   return 1
 }
 
 exec_gateway() {
   echo "[bootstrap] dropping privileges to $PUID:$PGID and starting gateway"
+  node /usr/local/bin/openclaw-bootstrap-healthcheck.mjs --publish
   exec setpriv --reuid="$PUID" --regid="$PGID" --init-groups \
     env HOME=/home/node PATH="$PATH" \
     node /app/dist/index.js gateway --bind lan --auth token
+}
+
+# The build-pinned helper owns only native backup-first DB schema readiness.
+# It never imports sessions, changes config, or restores queue rows on retry.
+prepare_database_schemas() {
+  if ! DATABASE_SCHEMA_RESULT=$(run_as_puid env OPENCLAW_CONFIG_PATH="${1:-$CFG}" node /usr/local/bin/migrate-openclaw-database-schemas.mjs); then
+    case "$DATABASE_SCHEMA_RESULT" in
+      'database-schema: refused code='[a-z0-9-]*) echo "[bootstrap] $DATABASE_SCHEMA_RESULT" 1>&2 ;;
+      *) echo "[bootstrap] database-schema: refused code=entrypoint-status" 1>&2 ;;
+    esac
+    return 1
+  fi
+  case "$DATABASE_SCHEMA_RESULT" in
+    'database-schema: no-op'|'database-schema: applied') echo "[bootstrap] $DATABASE_SCHEMA_RESULT" ;;
+    *) echo "[bootstrap] database-schema: refused code=entrypoint-status" 1>&2; return 1 ;;
+  esac
 }
 
 # Native validation is authoritative. The migrator only handles the exact
@@ -442,6 +467,10 @@ preflight_supported_migration() {
     candidate_preflight_failed "workspace migration refused; legacy workspace sources were left for manual recovery."
     return 1
   fi
+  if ! prepare_database_schemas "$MIGRATION_CANDIDATE_CFG"; then
+    candidate_preflight_failed "native database schema readiness refused before session preflight."
+    return 1
+  fi
   if ! SESSION_PREFLIGHT_RESULT=$(run_as_puid env OPENCLAW_CONFIG_PATH="$MIGRATION_CANDIDATE_CFG" node /usr/local/bin/migrate-openclaw-legacy-sessions.mjs --preflight); then
     case "$SESSION_PREFLIGHT_RESULT" in
       'session-migration: failed code='*' status='*) echo "[bootstrap] $SESSION_PREFLIGHT_RESULT" 1>&2 ;;
@@ -450,8 +479,9 @@ preflight_supported_migration() {
     candidate_preflight_failed "session migration preflight refused; legacy session sources were left for manual recovery."
     return 1
   fi
+  migrate_exec_approvals
   if ! cleanup_migration_candidate; then
-    echo "[bootstrap] FATAL: temporary migration candidate cleanup failed. The real config was left byte-identical and no migration backup was created. Refusing managed writes." 1>&2
+    echo "[bootstrap] FATAL: temporary migration candidate cleanup failed. The real config was left byte-identical and no config-migration backup was created. Any verified SQLite schema snapshots were retained. Refusing managed writes." 1>&2
     return 1
   fi
   unset CANDIDATE_MIGRATION_RESULT
@@ -584,6 +614,14 @@ if ! run_as_puid node /app/dist/index.js config validate >/dev/null 2>&1; then
   echo "[bootstrap] FATAL: OpenClaw config failed native validation before workspace migration. Refusing managed writes." 1>&2
   exit 1
 fi
+
+# Check every workspace source before native schema maintenance can write.
+if ! run_as_puid node /usr/local/bin/migrate-openclaw-legacy-workspaces.mjs --preflight-config "$CFG" >/dev/null 2>&1; then
+  echo "[bootstrap] workspace-migration: refused" 1>&2
+  exit 1
+fi
+prepare_database_schemas || exit 1
+migrate_exec_approvals
 
 if ! WORKSPACE_MIGRATION_RESULT=$(run_as_puid node /usr/local/bin/migrate-openclaw-legacy-workspaces.mjs); then
   echo "[bootstrap] workspace-migration: refused" 1>&2

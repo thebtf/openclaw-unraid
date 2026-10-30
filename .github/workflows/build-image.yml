@@ -36,6 +36,10 @@ on:
       - scripts/migrate-openclaw-exec-approvals.mjs
       - scripts/build-openclaw-default-agent-roles-adapter.mjs
       - scripts/materialize-legacy-default-agent-roles.mjs
+      - scripts/build-openclaw-schema-migration-adapter.mjs
+      - scripts/migrate-openclaw-database-schemas.mjs
+      - scripts/openclaw-bootstrap-healthcheck.mjs
+      - scripts/fixtures/historical-same-volume-regression.mjs
       - scripts/fixtures/legacy-default-agent-roles.json
       - .github/workflows/build-image.yml
   schedule:
@@ -189,7 +193,7 @@ jobs:
           '
           echo "EXEC APPROVALS DETECTION DIAGNOSTICS SMOKE OK"
 
-      # The root entrypoint must not make Docker's healthcheck a root state writer.
+      # The real healthcheck must not become any pre-backup state writer.
       - name: Healthcheck identity smoke
         if: steps.gate.outputs.build == 'true'
         run: |
@@ -199,7 +203,7 @@ jobs:
           }
           trap cleanup EXIT
 
-          # Hold startup to exercise the upstream config fallback without a Gateway.
+          # Before bootstrap, the real image healthcheck must not open state.
           # Invoke the image's real healthcheck explicitly, not a replacement probe.
           docker run -d --name smoke-healthcheck --no-healthcheck \
             -e PUID=1000 -e PGID=1000 --entrypoint sh "$DERIVED_IMAGE:smoke" -ceu '
@@ -212,6 +216,8 @@ jobs:
           docker exec smoke-healthcheck node -e '
             const assert = require("node:assert/strict");
             const { spawnSync } = require("node:child_process");
+            const fs = require("node:fs");
+            assert.equal(fs.existsSync("/home/node/.openclaw/state"), false, "no-Gateway fixture already contains state");
             const test = JSON.parse(process.argv[1]);
             const command = test[0] === "CMD-SHELL" ? ["/bin/sh", "-c", test[1]] : test.slice(1);
             const result = spawnSync(command[0], command.slice(1), { stdio: "ignore" });
@@ -221,10 +227,12 @@ jobs:
             const assert = require("node:assert/strict");
             const fs = require("node:fs");
             for (const path of ["/home/node/.openclaw/state", "/home/node/.openclaw/state/openclaw.sqlite"]) {
-              const stat = fs.statSync(path);
-              assert.equal(stat.uid, 1000, "healthcheck must preserve the runtime UID");
-              assert.equal(stat.gid, 1000, "healthcheck must preserve the runtime GID");
+              assert.equal(fs.existsSync(path), false, "guarded no-Gateway healthcheck created state before backup");
             }
+            const config = "/home/node/.openclaw/openclaw.json";
+            assert.equal(fs.readFileSync(config, "utf8"), "{}\n", "guarded healthcheck changed config");
+            assert.equal(fs.statSync(config).uid, 1000, "guarded healthcheck changed config UID");
+            assert.equal(fs.statSync(config).gid, 1000, "guarded healthcheck changed config GID");
           '
           echo "HEALTHCHECK IDENTITY SMOKE OK"
 
@@ -242,6 +250,55 @@ jobs:
             docker volume rm "$log_volume" >/dev/null 2>&1 || true
           }
           trap cleanup EXIT
+          healthcheck=$(docker image inspect -f '{{json .Config.Healthcheck.Test}}' "$DERIVED_IMAGE:smoke")
+          check_native_healthcheck() {
+            for _ in $(seq 1 36); do
+              # Execute the configured HEALTHCHECK unchanged. Built-in V8 coverage
+              # identifies the original native child and its actual non-root UID.
+              if docker exec smoke node -e '
+                const assert = require("node:assert/strict");
+                const fs = require("node:fs");
+                const { spawnSync } = require("node:child_process");
+                const uid = Number(process.env.PUID), gid = Number(process.env.PGID);
+                assert.equal(uid, 1026); assert.equal(gid, 100);
+                const coverage = fs.mkdtempSync("/tmp/openclaw-healthcheck-coverage-");
+                fs.chownSync(coverage, uid, gid);
+                try {
+                  const test = JSON.parse(process.argv[1]);
+                  const command = test[0] === "CMD-SHELL" ? ["/bin/sh", "-c", test[1]] : test.slice(1);
+                  const result = spawnSync(command[0], command.slice(1), {
+                    env: { ...process.env, NODE_V8_COVERAGE: coverage }, stdio: "ignore", timeout: 10000,
+                  });
+                  assert.equal(result.status, 0, "configured native healthcheck did not report healthy after Gateway startup");
+                  let nativeProbeExecuted = false;
+                  for (const name of fs.readdirSync(coverage)) {
+                    const file = `${coverage}/${name}`, stat = fs.lstatSync(file);
+                    assert.ok(stat.isFile(), "unexpected healthcheck coverage artifact");
+                    assert.equal(stat.uid, uid, "healthcheck Node process ran under the wrong UID");
+                    assert.equal(stat.gid, gid, "healthcheck Node process ran under the wrong GID");
+                    const report = JSON.parse(fs.readFileSync(file, "utf8"));
+                    nativeProbeExecuted ||= report.result.some((script) => script.url === "file:///app/dist/docker-healthcheck.js" &&
+                      script.functions.some((fn) => fn.ranges.some((range) => range.count > 0)));
+                  }
+                  assert.ok(nativeProbeExecuted, "healthy wrapper did not execute the original native healthcheck");
+                  const state = "/home/node/.openclaw/state";
+                  const paths = [state, `${state}/openclaw.sqlite`, ...fs.readdirSync(state)
+                    .filter((name) => /^openclaw\.sqlite-(?:wal|shm|journal)$/.test(name)).map((name) => `${state}/${name}`)];
+                  for (const file of paths) {
+                    const stat = fs.statSync(file);
+                    assert.equal(stat.uid, uid, "native healthcheck left root-owned SQLite state");
+                    assert.equal(stat.gid, gid, "native healthcheck changed SQLite state GID");
+                  }
+                } finally { fs.rmSync(coverage, { recursive: true, force: true }); }
+              ' "$healthcheck"; then
+                return 0
+              fi
+              [ "$(docker inspect -f '{{.State.Running}}' smoke)" = "true" ] || break
+              sleep 5
+            done
+            echo "SMOKE FAIL: original native healthcheck did not pass under PUID:PGID" 1>&2
+            return 1
+          }
 
           docker volume create "$log_volume" >/dev/null
 
@@ -282,6 +339,7 @@ jobs:
             docker logs smoke 2>&1 | tail -40
             exit 1
           fi
+          check_native_healthcheck
           # The gateway runs as the real Unraid UID:GID and must be able to
           # append to its own log target. Ownership and restrictive modes
           # are re-established on every start, not only on first boot.
@@ -318,6 +376,7 @@ jobs:
             docker logs smoke 2>&1 | tail -80
             exit 1
           fi
+          check_native_healthcheck
           test "$(docker exec smoke stat -c '%u:%g %a' /tmp/openclaw)" = "1026:100 700"
           test "$(docker exec smoke stat -c '%u:%g %a' /tmp/openclaw/openclaw.log)" = "1026:100 600"
           docker exec smoke grep -q '^uid-1026-write$' /tmp/openclaw/openclaw.log
@@ -2286,7 +2345,7 @@ jobs:
             assert.match(version.stdout, /2026\.9\.2\b/);
           '
           # Sessions come from legacy JSONL: never synthesize SQLite schemas or
-          # alter user_version; the ordinary failed-delivery sentinel is added below.
+          # alter user_version; delivery fixtures use the real old table below.
           # No provider, external network, personal state or credentials are used.
           docker run --rm --network none -v "$upgrade_volume:/home/node/.openclaw" \
             --entrypoint sh "$old_image" -ceu '
@@ -2332,8 +2391,12 @@ jobs:
             -v "$upgrade_volume:/home/node/.openclaw" --entrypoint node "$old_image" \
             /app/openclaw.mjs doctor --session-sqlite validate --session-sqlite-all-agents --json
 
-          # Add only an ordinary synthetic row to the old runtime-created table;
-          # preserve its real schema/user_version and retain failed delivery history.
+          # Native retention contract: Engram #516 correction/fault evidence,
+          # schema-lifecycle-20261030/openclaw-state-db-legacy-backfills-Q7iQluye.mjs
+          # lines 543-546, 579-668, 964-1000; fault109-summary.json deliveryContract.
+          # Terminal payload compaction is allowed; losing unfinished work or its
+          # duplicate-admission fence is not. Use an unconsumed private queue, as
+          # final-multi-queue-approval-seed.json did, so startup cannot send it.
           docker run --rm --network none --user 1000:1000 \
             -v "$upgrade_volume:/home/node/.openclaw" --entrypoint node "$old_image" -e '
               const assert = require("node:assert/strict");
@@ -2341,9 +2404,24 @@ jobs:
               const db = new DatabaseSync("/home/node/.openclaw/state/openclaw.sqlite");
               try {
                 assert.equal(db.prepare("PRAGMA user_version").get().user_version, 15);
-                const id = "synthetic-retained-failed-delivery", now = Date.now();
-                db.prepare("INSERT INTO delivery_queue_entries(queue_name,id,status,retry_count,entry_json,enqueued_at,updated_at,failed_at) VALUES(?,?,?,?,?,?,?,?)")
-                  .run("outbound", id, "failed", 1, JSON.stringify({ id, retryCount: 1, error: "synthetic-only-retained-failure" }), now, now, now);
+                const now = Date.now(), queue = "synthetic-offline-v1";
+                const cases = [
+                  ["synthetic-retained-failed-delivery", "failed", "unknown_after_send", { retainOnFailure: true }],
+                  ["synthetic-ambiguous-failed-delivery", "failed", "unknown_after_send", { platformSendAttemptId: "synthetic-original-attempt" }],
+                  ["synthetic-pending-delivery", "pending", "unknown_after_send", { retainOnFailure: true }],
+                  ["synthetic-settlement-delivery", "failed", "settlement_pending", { retainOnFailure: true }],
+                  ["synthetic-disposable-failed-delivery", "failed", null, {}]
+                ];
+                const insert = db.prepare("INSERT INTO delivery_queue_entries(queue_name,id,status,entry_kind,channel,target,retry_count,last_attempt_at,last_error,recovery_state,platform_send_started_at,entry_json,enqueued_at,updated_at,failed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+                for (const [id, status, recoveryState, retention] of cases) {
+                  const entry = { id, enqueuedAt: now, retryCount: 4, kind: "message",
+                    channel: "synthetic-offline", to: "offline-only", payload: { text: `Original unsent payload for ${id}` },
+                    lastAttemptAt: now - 10, lastError: "synthetic-original-error",
+                    ...(recoveryState ? { recoveryState, platformSendStartedAt: now - 20 } : {}), ...retention };
+                  insert.run(queue, id, status, entry.kind, entry.channel, entry.to, entry.retryCount,
+                    entry.lastAttemptAt, entry.lastError, recoveryState, entry.platformSendStartedAt ?? null,
+                    JSON.stringify(entry), now, now, status === "failed" ? now : null);
+                }
                 assert.equal(db.prepare("PRAGMA user_version").get().user_version, 15);
               } finally { db.close(); }
             '
@@ -2372,7 +2450,40 @@ jobs:
               const canonical = (values) => values.map((row) => JSON.stringify(columns.map((column) => row[column]))).sort();
               assert.deepEqual(canonical(actual), canonical(expected), label);
             };
-            const deliveryRows = (database) => database.prepare("SELECT * FROM delivery_queue_entries WHERE id = ?").all("synthetic-retained-failed-delivery");
+            const deliveryRows = (database) => database.prepare("SELECT * FROM delivery_queue_entries WHERE queue_name = ? ORDER BY id").all("synthetic-offline-v1");
+            const checkDelivery = (actual, expected, migrated) => {
+              // A preflight refusal must still prove preservation, then fail on
+              // readiness, not on an expectation that migration already ran.
+              if (!migrated) return sameRows(actual, expected, "unchanged schema changed original delivery state");
+              const retained = expected.filter((row) => row.id !== "synthetic-disposable-failed-delivery");
+              for (const original of retained) {
+                const row = actual.find((item) => item.id === original.id);
+                assert.ok(row, `lost required delivery ${original.id}`);
+                if (original.status === "pending" || original.recovery_state === "settlement_pending") {
+                  // Source 636 skips settlement; 641-646/964-1000 preserve pending
+                  // JSON and may recover its metadata. This fixture seeds those
+                  // columns completely, so every original value must survive.
+                  sameRows([row], [original], `unfinished delivery changed: ${original.id}`);
+                  continue;
+                }
+                // Source 580-589/648-665 and fault109 operational semantics:
+                // protected and ambiguous failures become permanent tombstones.
+                const entry = JSON.parse(row.entry_json);
+                assert.equal(row.status, "failed", `terminal delivery resurrected: ${row.id}`);
+                assert.equal(row.recovery_state, "completed_permanent", `lost permanent fence: ${row.id}`);
+                assert.equal(entry.completionRetention, "permanent");
+                assert.equal(entry.recoveryState, "completed_permanent");
+                assert.equal(entry.id, original.id);
+                assert.equal(entry.retryCount, original.retry_count);
+                assert.equal(row.retry_count, original.retry_count);
+                assert.equal(entry.failedAt, original.failed_at);
+                assert.equal(row.failed_at, original.failed_at);
+              }
+              const disposable = actual.find((row) => row.id === "synthetic-disposable-failed-delivery");
+              // Source 650-653 permits deletion, not resurrection into pending.
+              if (disposable) assert.equal(disposable.status, "failed", "disposable failure was replayed");
+              assert.ok(actual.every((row) => expected.some((old) => old.id === row.id)), "upgrade created unexpected delivery work");
+            };
             const agentPath = `${root}/agents/main/agent/openclaw-agent.sqlite`;
             const sharedPath = `${root}/state/openclaw.sqlite`;
             const db = new DatabaseSync(agentPath, { readOnly: true });
@@ -2431,7 +2542,7 @@ jobs:
                   assert.equal(backup.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
                   if (move.sourcePath === sharedPath) {
                     assert.equal(backup.prepare("PRAGMA user_version").get().user_version, before.sharedVersion);
-                    sameRows(deliveryRows(backup), before.delivery, "verified backup lost or changed retained failed delivery");
+                    sameRows(deliveryRows(backup), before.delivery, "verified original backup lost or changed delivery state, including disposable history");
                   } else assert.equal(backup.prepare("PRAGMA user_version").get().user_version, before.agentVersion);
                 } finally { backup.close(); }
                 backedUpSources.add(move.sourcePath);
@@ -2450,8 +2561,9 @@ jobs:
               assert.equal(rows.session_nodes.length, 2);
               assert.equal(rows.session_windows.length, 2);
               assert.equal(rows.transcript_events.length, 6);
-              assert.equal(result.delivery.length, 1);
-              assert.equal(result.delivery[0].status, "failed");
+              assert.equal(result.delivery.length, 5);
+              assert.equal(result.delivery.filter((row) => row.status === "pending").length, 1);
+              assert.equal(result.delivery.filter((row) => row.recovery_state === "settlement_pending").length, 1);
               process.stdout.write(JSON.stringify(result));
             } else {
               assert.equal(result.agentInode, before.agentInode, "agent database was replaced");
@@ -2463,11 +2575,59 @@ jobs:
                 sameRows(rows[name], oldRows, `unsafe update to persisted ${name}`);
               }
               console.log("HISTORICAL SESSION PRESERVATION OK: 2 sessions, 6 logical events, 3 archives, unchanged import receipts and unrelated agent values");
-              sameRows(result.delivery, before.delivery, "unsafe deletion or update of retained failed delivery");
-              if (result.sharedVersion !== before.sharedVersion) assert.ok(backedUpSources.has(sharedPath), "shared upgrade requires verified original backup with retained delivery");
+              checkDelivery(result.delivery, before.delivery, result.sharedVersion !== before.sharedVersion);
+              if (result.sharedVersion !== before.sharedVersion) assert.ok(backedUpSources.has(sharedPath), "shared upgrade requires verified original backup with all original deliveries");
               if (result.agentVersion !== before.agentVersion) assert.ok(backedUpSources.has(agentPath), "agent upgrade requires verified original backup");
-              console.log("HISTORICAL DELIVERY PRESERVATION OK: retained failed row unchanged; schema upgrades require verified pre-migration backups");
+              console.log("HISTORICAL DELIVERY PRESERVATION OK: unfinished work unchanged; protected/ambiguous fences retained; verified original backups");
             }
+          '
+          # Exercise the shipped producer admission and recovery query, not a
+          # hand-written eligibility predicate. Evidence: fault109-native-unfinished-
+          # eligibility.json and final-native-protected-duplicate-refusal.json.
+          # Resolve export aliases from the actual installed bundle; unknown or
+          # ambiguous native API shapes refuse rather than silently skip coverage.
+          delivery_probe_js='
+            (async () => {
+              const assert = require("node:assert/strict");
+              const fs = require("node:fs");
+              const { pathToFileURL } = require("node:url");
+              const { DatabaseSync } = require("node:sqlite");
+              const names = ["bindDeliveryQueueEntry", "upsertBoundDeliveryQueueEntryInDatabase", "deliveryQueueEntriesQuery"];
+              const modules = fs.readdirSync("/app/dist").filter((name) => /^openclaw-state-db-legacy-backfills-.*\.mjs$/.test(name))
+                .map((name) => ({ file: `/app/dist/${name}`, source: fs.readFileSync(`/app/dist/${name}`, "utf8") }))
+                .filter(({ source }) => names.every((name) => source.includes(`function ${name}(`)));
+              assert.equal(modules.length, 1, "expected one shipped native delivery API module");
+              const { file, source } = modules[0];
+              const exports = [...source.matchAll(/export\s*\{([^}]+)\}/g)].flatMap((match) => match[1].split(",").map((part) => part.trim()));
+              const native = await import(pathToFileURL(file).href);
+              const api = Object.fromEntries(names.map((name) => {
+                const matches = exports.map((part) => part.match(new RegExp(`^${name}(?:\\s+as\\s+(\\w+))?$`))).filter(Boolean);
+                assert.equal(matches.length, 1, `missing or ambiguous native export ${name}`);
+                const fn = native[matches[0][1] ?? name];
+                assert.equal(typeof fn, "function", `invalid native export ${name}`);
+                return [name, fn];
+              }));
+              const db = new DatabaseSync("/home/node/.openclaw/state/openclaw.sqlite");
+              const queue = "synthetic-offline-v1";
+              const ids = ["synthetic-retained-failed-delivery", "synthetic-ambiguous-failed-delivery", "synthetic-pending-delivery", "synthetic-settlement-delivery"];
+              try {
+                const read = () => db.prepare("SELECT * FROM delivery_queue_entries WHERE queue_name = ? ORDER BY id").all(queue);
+                const before = read();
+                db.exec("BEGIN IMMEDIATE");
+                try {
+                  const query = api.deliveryQueueEntriesQuery({ db }, [queue], "unfinished").compile();
+                  const eligible = db.prepare(query.sql).all(...query.parameters).map((row) => row.id).sort();
+                  assert.deepEqual(eligible, ["synthetic-pending-delivery", "synthetic-settlement-delivery"], "terminal fences became replay-eligible, or unfinished work disappeared");
+                  for (const id of ids) {
+                    const bound = api.bindDeliveryQueueEntry({ queueName: queue, entry: { id, enqueuedAt: Date.now(), retryCount: 0 }, insertOnly: true });
+                    assert.equal(api.upsertBoundDeliveryQueueEntryInDatabase(bound, { db }), false, `duplicate producer admission accepted: ${id}`);
+                  }
+                  assert.deepEqual(read(), before, "native duplicate-admission probe changed state");
+                } finally { db.exec("ROLLBACK"); }
+                assert.deepEqual(read(), before, "probe transaction was not rolled back");
+              } finally { db.close(); }
+              console.log("HISTORICAL NATIVE DELIVERY SAFETY OK: four duplicate admissions refused; only pending/settlement remain unfinished; no sends exercised");
+            })().catch((error) => { console.error(error); process.exitCode = 1; });
           '
           before=$(docker run --rm --network none --user 1000:1000 \
             -v "$upgrade_volume:/home/node/.openclaw" --entrypoint node "$old_image" -e "$snapshot_js" before)
@@ -2503,6 +2663,33 @@ jobs:
               /app/dist/index.js doctor --session-sqlite dry-run --session-sqlite-all-agents --json || true
             exit 1
           fi
+          docker run --rm --network none --user 1000:1000 \
+            -v "$upgrade_volume:/home/node/.openclaw" --entrypoint node "$DERIVED_IMAGE:smoke" -e "$delivery_probe_js"
+          # Repeat the real entrypoint on the same stopped container/volume; do
+          # not re-import, restore raw queue rows or substitute a health command.
+          docker start "$upgrade_container" >/dev/null
+          ready=false
+          for _ in $(seq 1 36); do
+            [ "$(docker inspect -f '{{.State.Running}}' "$upgrade_container")" = "true" ] || break
+            if docker exec "$upgrade_container" node -e '
+              fetch("http://127.0.0.1:18789/readyz", { signal: AbortSignal.timeout(2000) })
+                .then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1));
+            '; then
+              ready=true
+              break
+            fi
+            sleep 5
+          done
+          docker stop -t 15 "$upgrade_container" >/dev/null
+          printf "%s" "$before" | docker run --rm -i --network none --user 1000:1000 \
+            -v "$upgrade_volume:/home/node/.openclaw" --entrypoint node "$old_image" -e "$snapshot_js" after
+          if [ "$ready" != true ]; then
+            echo "HISTORICAL UPGRADE SMOKE FAIL: same-volume restart did not reach Gateway readiness" >&2
+            docker logs "$upgrade_container" 2>&1 | tail -40
+            exit 1
+          fi
+          docker run --rm --network none --user 1000:1000 \
+            -v "$upgrade_volume:/home/node/.openclaw" --entrypoint node "$DERIVED_IMAGE:smoke" -e "$delivery_probe_js"
           echo "HISTORICAL 2026.9.2 SAME-VOLUME UPGRADE SMOKE OK"
 
       - name: Log in to GHCR

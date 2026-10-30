@@ -19,7 +19,7 @@ const REQUIRED_EXPORTS = [
 ];
 const ADAPTER_BASENAME = "openclaw-unraid-workspace-migration-adapter.mjs";
 const RECORD_VERSION = 1;
-const CONFIG_FACADE_RELATIVE_PATH = "index.js";
+const CONFIG_FACADE_RELATIVE_PATH = "config/config.js";
 const DOCTOR_MODULE_FILENAME = /^state-migrations\.doctor-[A-Za-z0-9_-]+\.(?:mjs|js)$/;
 
 class BuildContractError extends Error { }
@@ -109,8 +109,8 @@ async function assertConfigFacade(distDir) {
  } catch {
   throw new BuildContractError("OpenClaw config loader facade is unavailable");
  }
- if (typeof namespace.loadConfig !== "function") {
-  throw new BuildContractError("OpenClaw config loader facade has an unexpected export shape");
+ if (typeof namespace.createConfigIO !== "function" || typeof namespace.loadConfig !== "function") {
+  throw new BuildContractError("OpenClaw config inspection facade has an unexpected export shape");
  }
  return configModulePath;
 }

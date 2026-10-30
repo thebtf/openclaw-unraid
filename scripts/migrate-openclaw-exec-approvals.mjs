@@ -14,7 +14,7 @@ import { TextDecoder } from "node:util";
 
 const RECORD_PATH = "/usr/local/lib/openclaw-unraid-exec-approvals-migration.json";
 const ADAPTER_BASENAME = "openclaw-unraid-exec-approvals-migration-adapter.mjs";
-const REQUIRED_ADAPTER_EXPORTS = ["detectLegacyExecApprovals", "migrateLegacyExecApprovals"];
+const REQUIRED_ADAPTER_EXPORTS = ["detectLegacyExecApprovals", "migrateLegacyExecApprovals", "isValidLegacyExecApprovalsSource"];
 const SOURCE_BASENAME = "exec-approvals.json";
 const CLAIM_SUFFIX = ".doctor-importing";
 const BACKUP_SUFFIX = ".openclaw-2026.8.2-pre-migration.bak";
@@ -558,7 +558,8 @@ async function assertAbsent(filePath) {
 }
 
 async function main() {
- if (process.argv.length !== 2) {
+ const preflightOnly = process.argv.length === 3 && process.argv[2] === "--preflight";
+ if (!preflightOnly && process.argv.length !== 2) {
   refuse("arguments");
  }
 
@@ -609,6 +610,13 @@ async function main() {
   refuse("source");
  }
  await readVerifiedExistingBackup(backup.backupPath, plan.snapshot.bytes);
+ if (preflightOnly) {
+  let raw;
+  try { raw = utf8Decoder.decode(plan.snapshot.bytes); }
+  catch { refuse("source-invalid"); }
+  if (!adapter.isValidLegacyExecApprovalsSource(raw)) refuse("source-invalid");
+  return "exec-approvals-migration: preflight";
+ }
 
  let migrated;
  try {
