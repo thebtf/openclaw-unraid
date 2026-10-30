@@ -60,15 +60,38 @@ jobs:
 
       - name: Resolve upstream tag
         id: tag
+        env:
+          REQUESTED_TAG: ${{ github.event.inputs.upstream_tag || 'latest' }}
         run: |
-          TAG="${{ github.event.inputs.upstream_tag || 'latest' }}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [[ ! "$REQUESTED_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "Invalid upstream tag" >&2
+            exit 1
+          fi
+          echo "tag=$REQUESTED_TAG" >> "$GITHUB_OUTPUT"
+
+      # Resolve once, including cron: drift, smoke and Push share this digest.
+      - name: Capture immutable upstream digest
+        id: base
+        env:
+          UPSTREAM_TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          DIGEST=$(docker buildx imagetools inspect "$UPSTREAM_IMAGE:$UPSTREAM_TAG" --format '{{json .Manifest}}' | jq -er .digest)
+          if [[ ! "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "Invalid upstream digest" >&2
+            exit 1
+          fi
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          # Dockerfile prefixes the argument with image:, so retain tag@digest.
+          echo "selector=$UPSTREAM_TAG@$DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Check whether upstream digest changed (cron only)
         id: drift
         if: github.event_name == 'schedule'
+        env:
+          UPSTREAM_DIGEST: ${{ steps.base.outputs.digest }}
         run: |
-          UPSTREAM_DIGEST=$(docker buildx imagetools inspect "$UPSTREAM_IMAGE:latest" --format '{{json .Manifest}}' | jq -r .digest)
           OURS_BASE_DIGEST=$(docker buildx imagetools inspect "$DERIVED_IMAGE:latest" --format '{{json .}}' 2>/dev/null \
             | jq -r '..|.["org.opencontainers.image.base.digest"]? // empty' | head -1 || true)
           echo "upstream=$UPSTREAM_DIGEST ours_base=$OURS_BASE_DIGEST"
@@ -101,13 +124,6 @@ jobs:
         if: steps.gate.outputs.build == 'true'
         uses: docker/setup-buildx-action@v3
 
-      - name: Capture upstream digest for provenance label
-        if: steps.gate.outputs.build == 'true'
-        id: base
-        run: |
-          DIGEST=$(docker buildx imagetools inspect "$UPSTREAM_IMAGE:${{ steps.tag.outputs.tag }}" --format '{{json .Manifest}}' | jq -r .digest)
-          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
-
       # Build WITHOUT pushing: load into the runner's docker for the smoke gate.
       - name: Build (local, for smoke)
         if: steps.gate.outputs.build == 'true'
@@ -117,7 +133,7 @@ jobs:
           push: false
           load: true
           build-args: |
-            OPENCLAW_TAG=${{ steps.tag.outputs.tag }}
+            OPENCLAW_TAG=${{ steps.base.outputs.selector }}
           labels: |
             org.opencontainers.image.base.digest=${{ steps.base.outputs.digest }}
           tags: ${{ env.DERIVED_IMAGE }}:smoke
@@ -2219,6 +2235,249 @@ jobs:
           '
           echo "PERSISTED EXEC APPROVALS AND DEFAULT-ROLE SMOKE OK"
 
+      # Unlike candidate-only import tests, this creates the real 9.2 SQLite
+      # schemas and native archive receipts before replacing only the image.
+      - name: Historical 2026.9.2 same-volume upgrade smoke
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          old_image=ghcr.io/thebtf/openclaw-unraid@sha256:bc899110358d4e2cd7c1c2818bf043ca5d8dae5d7e03eeedcc72a390748b4d2d
+          upgrade_volume=smoke-historical-92-state
+          upgrade_container=smoke-historical-92-candidate
+          cleanup() {
+            docker rm -f "$upgrade_container" >/dev/null 2>&1 || true
+            docker volume rm "$upgrade_volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker pull "$old_image"
+          docker volume create "$upgrade_volume" >/dev/null
+          docker run --rm --network none --entrypoint node "$old_image" -e '
+            const assert = require("node:assert/strict");
+            const { spawnSync } = require("node:child_process");
+            const version = spawnSync("node", ["/app/openclaw.mjs", "--version"], { encoding: "utf8" });
+            assert.equal(version.status, 0);
+            assert.match(version.stdout, /2026\.9\.2\b/);
+          '
+          # Sessions come from legacy JSONL: never synthesize SQLite schemas or
+          # alter user_version; the ordinary failed-delivery sentinel is added below.
+          # No provider, external network, personal state or credentials are used.
+          docker run --rm --network none -v "$upgrade_volume:/home/node/.openclaw" \
+            --entrypoint sh "$old_image" -ceu '
+              node -e '\''
+                const fs = require("node:fs");
+                const root = "/home/node/.openclaw";
+                fs.mkdirSync(`${root}/agents/main/sessions`, { recursive: true });
+                fs.mkdirSync(`${root}/workspace`, { recursive: true });
+                const timestamp = "2026-09-01T12:00:00.000Z";
+                const ids = ["11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"];
+                const registry = {};
+                for (const [i, id] of ids.entries()) {
+                  registry[`agent:main:${i ? "retained-synthetic" : "main"}`] = {
+                    sessionId: id, updatedAt: Date.parse(timestamp), sessionStartedAt: Date.parse(timestamp),
+                    lastInteractionAt: Date.parse(timestamp), chatType: "direct",
+                    sessionFile: `${root}/agents/main/sessions/${id}.jsonl`
+                  };
+                  const records = [
+                    { type: "session", version: 3, id, timestamp, cwd: `${root}/workspace` },
+                    { type: "message", id: `synthetic-user-${i}`, parentId: null, timestamp,
+                      message: { role: "user", content: [{ type: "text", text: `Synthetic upgrade fixture ${i} | `.repeat(256) }], timestamp: Date.parse(timestamp) } },
+                    { type: "message", id: `synthetic-assistant-${i}`, parentId: `synthetic-user-${i}`, timestamp,
+                      message: { role: "assistant", content: [{ type: "text", text: `Synthetic retained reply ${i} | `.repeat(256) }],
+                        api: "openai-completions", provider: "synthetic", model: "offline-no-model-call",
+                        usage: { input: 1, output: 1, totalTokens: 2 }, stopReason: "stop", timestamp: Date.parse(timestamp) } }
+                  ];
+                  fs.writeFileSync(`${root}/agents/main/sessions/${id}.jsonl`, records.map((record) => JSON.stringify(record)).join("\n") + "\n");
+                }
+                fs.writeFileSync(`${root}/agents/main/sessions/sessions.json`, JSON.stringify(registry));
+                fs.writeFileSync(`${root}/openclaw.json`, JSON.stringify({
+                  gateway: { mode: "local", auth: { mode: "token", token: "synthetic-public-fixture-token" } },
+                  agents: { defaults: { workspace: `${root}/workspace` } }, plugins: { enabled: false }
+                }));
+              '\''
+              chown -R 1000:1000 /home/node/.openclaw
+            '
+          # This focused public old-runtime import creates shared schema 15,
+          # agent schema 19, two sessions, six events and three archived originals.
+          docker run --rm --network none --user 1000:1000 \
+            -v "$upgrade_volume:/home/node/.openclaw" --entrypoint node "$old_image" \
+            /app/openclaw.mjs doctor --session-sqlite import --session-sqlite-all-agents --json
+          docker run --rm --network none --user 1000:1000 \
+            -v "$upgrade_volume:/home/node/.openclaw" --entrypoint node "$old_image" \
+            /app/openclaw.mjs doctor --session-sqlite validate --session-sqlite-all-agents --json
+
+          # Add only an ordinary synthetic row to the old runtime-created table;
+          # preserve its real schema/user_version and retain failed delivery history.
+          docker run --rm --network none --user 1000:1000 \
+            -v "$upgrade_volume:/home/node/.openclaw" --entrypoint node "$old_image" -e '
+              const assert = require("node:assert/strict");
+              const { DatabaseSync } = require("node:sqlite");
+              const db = new DatabaseSync("/home/node/.openclaw/state/openclaw.sqlite");
+              try {
+                assert.equal(db.prepare("PRAGMA user_version").get().user_version, 15);
+                const id = "synthetic-retained-failed-delivery", now = Date.now();
+                db.prepare("INSERT INTO delivery_queue_entries(queue_name,id,status,retry_count,entry_json,enqueued_at,updated_at,failed_at) VALUES(?,?,?,?,?,?,?,?)")
+                  .run("outbound", id, "failed", 1, JSON.stringify({ id, retryCount: 1, error: "synthetic-only-retained-failure" }), now, now, now);
+                assert.equal(db.prepare("PRAGMA user_version").get().user_version, 15);
+              } finally { db.close(); }
+            '
+
+          # Keep proof in shell memory, not in the migrated state. Inspect SQLite
+          # read-only; compare logical transcript bytes across native JSON/zstd
+          # storage changes, while retaining session identities and other values.
+          # SQLite handles are read-only; allow WAL/SHM sidecars on this throwaway
+          # volume so inspection also works after native schema maintenance.
+          snapshot_js='
+            const assert = require("node:assert/strict");
+            const fs = require("node:fs");
+            const path = require("node:path");
+            const { createHash } = require("node:crypto");
+            const { DatabaseSync } = require("node:sqlite");
+            const { zstdDecompressSync } = require("node:zlib");
+            const root = "/home/node/.openclaw";
+            const before = process.argv[1] === "before" ? null : JSON.parse(fs.readFileSync(0, "utf8"));
+            const identity = (file) => {
+              const stat = fs.statSync(file, { bigint: true });
+              return { dev: String(stat.dev), ino: String(stat.ino), mtimeNs: String(stat.mtimeNs),
+                size: Number(stat.size), sha256: createHash("sha256").update(fs.readFileSync(file)).digest("hex") };
+            };
+            const sameRows = (actual, expected, label) => {
+              const columns = expected.length ? Object.keys(expected[0]) : [];
+              const canonical = (values) => values.map((row) => JSON.stringify(columns.map((column) => row[column]))).sort();
+              assert.deepEqual(canonical(actual), canonical(expected), label);
+            };
+            const deliveryRows = (database) => database.prepare("SELECT * FROM delivery_queue_entries WHERE id = ?").all("synthetic-retained-failed-delivery");
+            const agentPath = `${root}/agents/main/agent/openclaw-agent.sqlite`;
+            const sharedPath = `${root}/state/openclaw.sqlite`;
+            const db = new DatabaseSync(agentPath, { readOnly: true });
+            const shared = new DatabaseSync(sharedPath, { readOnly: true });
+            assert.equal(db.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
+            assert.equal(shared.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
+            const rows = {};
+            for (const { name } of db.prepare("SELECT name FROM sqlite_master WHERE type = ? ORDER BY name").all("table")) {
+              if (name.startsWith("sqlite_") || name === "schema_meta") continue;
+              rows[name] = db.prepare(`SELECT * FROM "${name.replaceAll("\"", "\"\"")}"`).all();
+            }
+            rows.transcript_events = rows.transcript_events.map((row) => {
+              const { event_zstd, ...logical } = row;
+              const plain = typeof row.event_json === "string" ? Buffer.from(row.event_json, "utf8") : null;
+              const compressed = event_zstd == null ? null : zstdDecompressSync(event_zstd);
+              if (compressed !== null) {
+                assert.ok(Number.isSafeInteger(row.event_utf8_bytes) && row.event_utf8_bytes >= 0, "invalid compressed transcript UTF-8 byte length");
+                assert.equal(compressed.length, row.event_utf8_bytes, "compressed transcript UTF-8 byte length mismatch");
+              }
+              assert.ok(plain !== null || compressed !== null, "transcript event has no readable payload");
+              if (plain !== null && compressed !== null) assert.ok(plain.equals(compressed), "conflicting transcript encodings");
+              // Base64 compares exact decompressed bytes, not parsed/reformatted JSON.
+              logical.event_json = (compressed ?? plain).toString("base64");
+              return logical;
+            });
+            const manifests = fs.readdirSync(`${root}/session-sqlite-migration-runs`).filter((name) => name.endsWith(".json")).sort();
+            const imports = manifests.filter((name) => name.startsWith("session-sqlite-"));
+            assert.equal(imports.length, 1, "upgrade must preserve its original native import receipt");
+            const archives = {};
+            const receipts = {};
+            const backedUpSources = new Set();
+            for (const name of manifests) {
+              const file = `${root}/session-sqlite-migration-runs/${name}`;
+              const manifest = JSON.parse(fs.readFileSync(file, "utf8"));
+              const recovery = name.startsWith("startup-migration-");
+              assert.ok(imports.includes(name) || (before && recovery), "unexpected migration manifest");
+              if (!recovery) receipts[name] = identity(file);
+              if (recovery) assert.equal(typeof manifest.completedAt, "string", "native backup receipt must be completed");
+              for (const target of manifest.targets ?? []) for (const move of target.completedMoves ?? []) {
+                const actual = identity(move.archivePath);
+                assert.deepEqual(actual, move.artifact?.identity, "native receipt no longer identifies its original artifact");
+                if (!recovery) {
+                  assert.ok(move.archivePath.startsWith(`${root}/agents/main/session-sqlite-import-archive/`));
+                  assert.equal(fs.existsSync(move.sourcePath), false, "legacy source reappeared");
+                  archives[path.relative(root, move.archivePath)] = actual;
+                  continue;
+                }
+                assert.equal(move.kind, "database-backup");
+                assert.ok([agentPath, sharedPath].includes(move.sourcePath), "unexpected backup source");
+                assert.ok(move.archivePath.startsWith(`${move.sourcePath}.pre-startup-migration-`) && move.archivePath.endsWith(".bak"));
+                assert.equal(target.validationBeforeArchive, "passed", "native database backup was not verified");
+                const sourceStat = fs.statSync(move.sourcePath, { bigint: true });
+                assert.deepEqual(target.databaseIdentity, { dev: String(sourceStat.dev), ino: String(sourceStat.ino) });
+                const backup = new DatabaseSync(move.archivePath, { readOnly: true });
+                try {
+                  assert.equal(backup.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
+                  if (move.sourcePath === sharedPath) {
+                    assert.equal(backup.prepare("PRAGMA user_version").get().user_version, before.sharedVersion);
+                    sameRows(deliveryRows(backup), before.delivery, "verified backup lost or changed retained failed delivery");
+                  } else assert.equal(backup.prepare("PRAGMA user_version").get().user_version, before.agentVersion);
+                } finally { backup.close(); }
+                backedUpSources.add(move.sourcePath);
+              }
+            }
+            assert.equal(Object.keys(archives).length, 3, "missing two transcripts or original sessions.json");
+            const result = { agentVersion: db.prepare("PRAGMA user_version").get().user_version,
+              sharedVersion: shared.prepare("PRAGMA user_version").get().user_version,
+              agentInode: String(fs.statSync(agentPath, { bigint: true }).ino),
+              sharedInode: String(fs.statSync(sharedPath, { bigint: true }).ino),
+              rows, delivery: deliveryRows(shared), archives, receipts };
+            db.close(); shared.close();
+            if (!before) {
+              assert.equal(result.agentVersion, 19);
+              assert.equal(result.sharedVersion, 15);
+              assert.equal(rows.session_nodes.length, 2);
+              assert.equal(rows.session_windows.length, 2);
+              assert.equal(rows.transcript_events.length, 6);
+              assert.equal(result.delivery.length, 1);
+              assert.equal(result.delivery[0].status, "failed");
+              process.stdout.write(JSON.stringify(result));
+            } else {
+              assert.equal(result.agentInode, before.agentInode, "agent database was replaced");
+              assert.equal(result.sharedInode, before.sharedInode, "shared database was replaced");
+              assert.deepEqual(result.archives, before.archives, "archived original identity changed");
+              assert.deepEqual(result.receipts, before.receipts, "native import receipt changed");
+              for (const [name, oldRows] of Object.entries(before.rows)) {
+                assert.ok(Array.isArray(rows[name]), `lost table ${name}`);
+                sameRows(rows[name], oldRows, `unsafe update to persisted ${name}`);
+              }
+              console.log("HISTORICAL SESSION PRESERVATION OK: 2 sessions, 6 logical events, 3 archives, unchanged import receipts and unrelated agent values");
+              sameRows(result.delivery, before.delivery, "unsafe deletion or update of retained failed delivery");
+              if (result.sharedVersion !== before.sharedVersion) assert.ok(backedUpSources.has(sharedPath), "shared upgrade requires verified original backup with retained delivery");
+              if (result.agentVersion !== before.agentVersion) assert.ok(backedUpSources.has(agentPath), "agent upgrade requires verified original backup");
+              console.log("HISTORICAL DELIVERY PRESERVATION OK: retained failed row unchanged; schema upgrades require verified pre-migration backups");
+            }
+          '
+          before=$(docker run --rm --network none --user 1000:1000 \
+            -v "$upgrade_volume:/home/node/.openclaw" --entrypoint node "$old_image" -e "$snapshot_js" before)
+          docker run -d --name "$upgrade_container" --network none \
+            -v "$upgrade_volume:/home/node/.openclaw" \
+            -e PUID=1000 -e PGID=1000 -e OPENCLAW_SKIP_SYSTEM_PATH_REMAP=1 \
+            -e OPENCLAW_GATEWAY_TOKEN=synthetic-public-fixture-token \
+            -e OPENCLAW_ALLOWED_ORIGINS=http://127.0.0.1:18789 \
+            "$DERIVED_IMAGE:smoke"
+          ready=false
+          for _ in $(seq 1 36); do
+            [ "$(docker inspect -f '{{.State.Running}}' "$upgrade_container")" = "true" ] || break
+            if docker exec "$upgrade_container" node -e '
+              fetch("http://127.0.0.1:18789/readyz", { signal: AbortSignal.timeout(2000) })
+                .then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1));
+            '; then
+              ready=true
+              break
+            fi
+            sleep 5
+          done
+          # Always check preservation, including the expected schema-refusal RED.
+          docker stop -t 15 "$upgrade_container" >/dev/null
+          printf "%s" "$before" | docker run --rm -i --network none --user 1000:1000 \
+            -v "$upgrade_volume:/home/node/.openclaw" --entrypoint node "$old_image" -e "$snapshot_js" after
+          if [ "$ready" != true ]; then
+            echo "HISTORICAL UPGRADE SMOKE FAIL: real 2026.9.2 state did not reach Gateway readiness" >&2
+            docker logs "$upgrade_container" 2>&1 | tail -40
+            # Focused native read-only diagnostic, never doctor --fix. This
+            # exposes the actual schema error without treating refusal as PASS.
+            docker run --rm --network none --user 1000:1000 \
+              -v "$upgrade_volume:/home/node/.openclaw:ro" --entrypoint node "$DERIVED_IMAGE:smoke" \
+              /app/dist/index.js doctor --session-sqlite dry-run --session-sqlite-all-agents --json || true
+            exit 1
+          fi
+          echo "HISTORICAL 2026.9.2 SAME-VOLUME UPGRADE SMOKE OK"
+
       # Push happens only after the smoke gate passed (cache hit — instant).
       - name: Push
         if: steps.gate.outputs.build == 'true'
@@ -2227,7 +2486,7 @@ jobs:
           context: .
           push: true
           build-args: |
-            OPENCLAW_TAG=${{ steps.tag.outputs.tag }}
+            OPENCLAW_TAG=${{ steps.base.outputs.selector }}
           labels: |
             org.opencontainers.image.base.digest=${{ steps.base.outputs.digest }}
           tags: |
