@@ -26,6 +26,9 @@ on:
       - scripts/test-media-fuse-image.sh
       - scripts/fixtures/media-*.mjs
       - scripts/fixtures/run-media-fuse-smoke.sh
+      - scripts/test-plugin-fuse-image.sh
+      - scripts/fixtures/plugin-fuse-readiness-regression.mjs
+      - scripts/fixtures/run-plugin-fuse-smoke.sh
       - scripts/fixtures/image-publication-regression.mjs
       - docker/**
       - scripts/migrate-openclaw-2-config.py
@@ -173,6 +176,17 @@ jobs:
         env:
           MEDIA_IMAGE_ID: ${{ steps.candidate.outputs.image_id }}
         run: sh scripts/test-media-fuse-image.sh "$MEDIA_IMAGE_ID"
+
+      # Actual shipped Gateway + dependency-heavy external plugin on real FUSE.
+      # This direct-Gateway gate does not cover entrypoint-only adaptations;
+      # those require a combined entrypoint/FUSE/plugin proof before release.
+      # Missing Docker/FUSE, failed controls and cleanup errors refuse publish.
+      - name: Real FUSE external plugin Gateway readiness
+        if: steps.gate.outputs.build == 'true'
+        timeout-minutes: 12
+        env:
+          PLUGIN_IMAGE_ID: ${{ steps.candidate.outputs.image_id }}
+        run: sh scripts/test-plugin-fuse-image.sh "$PLUGIN_IMAGE_ID"
 
       - name: Exec approvals detection diagnostics smoke
         if: steps.gate.outputs.build == 'true'
