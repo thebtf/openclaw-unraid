@@ -14,6 +14,7 @@ import { pathToFileURL } from 'node:url';
 const FUSE_MAGIC = 0x65735546;
 const CASE = 'actual-Telegram-remote-PDF-on-real-FUSE';
 const STOP = new Error('TELEGRAM_PDF_STOP_BEFORE_DISPATCH');
+const SENTINEL_FALLBACK = 'Something went wrong while processing your message. Please try again.';
 const abort = new AbortController();
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const sameFile = (left, right) => left.dev === right.dev && left.ino === right.ino;
@@ -22,6 +23,7 @@ let root;
 let rootIdentity;
 let server;
 let restoreFetch;
+let restoreSendMessage;
 let restoreRuntime;
 let closeState;
 let deadline;
@@ -37,6 +39,45 @@ let verified;
 let contextFailure;
 let httpFailure;
 let blockedHttp = 0;
+let stopThrown = false;
+let sentinelReported = false;
+const messageRequests = [];
+const pendingRequests = new Set();
+const requestFailures = [];
+let processingStop;
+let resolveProcessingStop;
+const processingStopped = new Promise(resolve => { resolveProcessingStop = resolve; });
+function observeProcessingStop(reason) {
+  if (processingStop) return;
+  processingStop = reason;
+  resolveProcessingStop();
+}
+async function waitForProcessingStop() {
+  abort.signal.throwIfAborted();
+  await new Promise((resolve, reject) => {
+    const onAbort = () => reject(abort.signal.reason);
+    abort.signal.addEventListener('abort', onAbort, { once: true });
+    processingStopped.then(() => {
+      abort.signal.removeEventListener('abort', onAbort);
+      resolve();
+    });
+  });
+}
+
+// Observe completion without replacing responses or changing returned promises.
+// Tracking sendMessage above grammY's throttler includes calls not yet in fetch.
+function trackRequest(task, label, onSettled = () => { }) {
+  const settled = Promise.resolve(task).then(
+    () => { onSettled(); },
+    error => { requestFailures.push({ label, message: String(error) }); onSettled(); },
+  );
+  pendingRequests.add(settled);
+  settled.then(() => pendingRequests.delete(settled));
+  return task;
+}
+async function settleRequests() {
+  while (pendingRequests.size) await Promise.all([...pendingRequests]);
+}
 
 function makePdf() {
   const text = 'BT /F1 12 Tf 72 720 Td (Synthetic Telegram FUSE regression) Tj ET\n';
@@ -226,7 +267,16 @@ try {
       } else if (method === 'sendMessage' || method === 'sendChatAction') {
         assert.equal(String(args.chat_id), String(senderId));
         calls[method]++;
-        if (method === 'sendMessage') warningTexts.push(String(args.text ?? ''));
+        if (method === 'sendMessage') {
+          const text = String(args.text ?? '');
+          warningTexts.push(text);
+          const initiated = messageRequests.find(request => !request.httpObserved && request.text === text);
+          assert(initiated, 'sendMessage reached HTTP without an observed API invocation');
+          initiated.httpObserved = true;
+          // Record a strict test failure, but return the normal synthetic API
+          // response so the original warning does not itself alter hydration.
+          if (text !== SENTINEL_FALLBACK || !initiated.allowedSentinelFallback) httpFailure ??= new Error(`unexpected Telegram message: ${text}`);
+        }
         result = method === 'sendChatAction' ? true : { message_id: 9000 + calls.sendMessage, date: Math.floor(Date.now() / 1000), chat: { id: senderId, type: 'private' }, text: args.text };
       } else {
         calls.forbidden++;
@@ -249,7 +299,7 @@ try {
       blockedHttp++;
       throw new Error('non-fixture HTTP request forbidden');
     }
-    return originalFetch(input, init);
+    return trackRequest(originalFetch(input, init), `HTTP ${url.pathname.replaceAll(token, '<synthetic-token>')}`);
   };
   globalThis.fetch = loopbackFetch;
   restoreFetch = () => { globalThis.fetch = originalFetch; };
@@ -330,7 +380,22 @@ try {
     botInfo: { id: 123456789, is_bot: true, first_name: 'Synthetic bot', username: 'synthetic_fuse_regression_bot', can_join_groups: false, can_read_all_group_messages: false, supports_inline_queries: false },
     telegramTransport: { fetch: loopbackFetch, sourceFetch: loopbackFetch, dispatcherAttempts: [] },
     fetchAbortSignal: abort.signal, mediaAbortSignal: abort.signal,
-    runtime: { log() { }, error: message => { diagnostics.push(String(message)); if (diagnostics.length > 8) diagnostics.shift(); } },
+    runtime: {
+      log() { },
+      error: message => {
+        const text = String(message);
+        diagnostics.push(text);
+        if (diagnostics.length > 8) diagnostics.shift();
+        // The installed onError logs this deliberate error immediately before
+        // initiating its unawaited generic reply. A failed PDF check cannot opt in.
+        if (verified && stopThrown && !contextFailure && text.includes('telegram debounce flush failed:') && text.includes(String(STOP))) {
+          sentinelReported = true;
+          observeProcessingStop('reported-context-sentinel');
+        } else if (contextFailure && text.includes('telegram debounce flush failed:') && text.includes(String(contextFailure))) {
+          observeProcessingStop('reported-context-failure');
+        }
+      },
+    },
     // Deliberately keep the shipped default Telegram dependencies: authorization,
     // file hydration and handler/storage behavior must not be test substitutes.
     buildContext: async input => {
@@ -368,10 +433,23 @@ try {
         throw error;
       }
       // Never return a context: no real model/session reply can follow this seam.
+      stopThrown = true;
       throw STOP;
     },
   }));
   assert.equal(typeof bot.handleUpdate, 'function');
+  const originalSendMessage = bot.api.sendMessage;
+  bot.api.sendMessage = function(...args) {
+    const request = {
+      text: String(args[1] ?? ''),
+      allowedSentinelFallback: Boolean(verified && stopThrown && sentinelReported && !contextFailure && args[1] === SENTINEL_FALLBACK),
+      httpObserved: false,
+      settled: false,
+    };
+    messageRequests.push(request);
+    return trackRequest(Reflect.apply(originalSendMessage, this, args), 'Bot API sendMessage', () => { request.settled = true; });
+  };
+  restoreSendMessage = () => { bot.api.sendMessage = originalSendMessage; };
   stage = CASE;
   const update = {
     update_id: 101,
@@ -387,8 +465,18 @@ try {
     await withRegistry(() => withChannelReadAuthority(() => abort.signal.throwIfAborted(), () => bot.handleUpdate(update), abort.signal));
   } catch (error) {
     // grammY may report the sentinel through bot.catch or propagate a BotError.
-    if (error !== STOP && error.error !== STOP && error.cause !== STOP) throw error;
+    if (error !== STOP && error.error !== STOP && error.cause !== STOP) {
+      observeProcessingStop('propagated-handler-failure');
+      throw error;
+    }
+    observeProcessingStop('propagated-context-sentinel');
   }
+  // enqueue may return on admission, before the flush has completed. Observe
+  // the actual sentinel/context error reporting (or propagated sentinel) first.
+  // The reporter initiates any fallback synchronously after logging; by the
+  // continuation below that API call is tracked even if still in the throttler.
+  await waitForProcessingStop();
+  await settleRequests();
   if (httpFailure) throw httpFailure;
   if (contextFailure) throw contextFailure;
   abort.signal.throwIfAborted();
@@ -399,16 +487,22 @@ try {
   assert.equal(dispatchAttempts, 0, 'model/dispatch boundary was entered');
   assert.equal(blockedHttp, 0, 'non-fixture HTTP was attempted');
   assert.equal(calls.forbidden, 0);
-  assert.equal(calls.sendMessage, 0, `happy-path intake emitted a warning; diagnostics=${JSON.stringify(diagnostics)}`);
-  emit(CASE, 'PASS', { ...verified, calls, dispatchAttempts, checkedBeforeContextSentinel: true });
+  assert.equal(requestFailures.length, 0, `synthetic API request failed: ${JSON.stringify(requestFailures)}`);
+  assert(messageRequests.every(request => request.allowedSentinelFallback && request.httpObserved && request.settled), `unexpected or unfinished Telegram message: ${JSON.stringify(messageRequests)}`);
+  assert.equal(calls.sendMessage, messageRequests.length);
+  assert(calls.sendMessage <= 1, 'unexpected repeated sentinel fallback');
+  emit(CASE, 'PASS', { ...verified, calls, dispatchAttempts, processingStop, sentinelFallbacks: calls.sendMessage, initiatedRequestsSettled: true, checkedBeforeContextSentinel: true });
 } catch (error) {
   failed = true;
-  emit(stage, 'FAIL', { code: error.code, message: error.message, diagnostics, warningTexts, contextMedia, calls, contextAttempts, dispatchAttempts });
+  emit(stage, 'FAIL', { code: error.code, message: error.message, diagnostics, warningTexts, contextMedia, calls, contextAttempts, dispatchAttempts, processingStop, messageRequests, requestFailures });
 } finally {
-  clearTimeout(deadline);
-  abort.abort(new Error('fixture teardown'));
+  // Keep the abort deadline active until initiated requests have settled.
   try {
+    await settleRequests();
+    clearTimeout(deadline);
+    abort.abort(new Error('fixture teardown'));
     if (server) await new Promise(resolve => { server.close(resolve); server.closeAllConnections(); });
+    restoreSendMessage?.();
     restoreFetch?.();
     restoreRuntime?.();
     await closeState?.();
