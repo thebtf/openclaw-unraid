@@ -40,6 +40,9 @@ const guardCommands = new Set([
   'if [ "$(docker image inspect --format \'{{.Id}}\' "$DERIVED_IMAGE:smoke")" != "$CANDIDATE_IMAGE_ID" ]; then',
   'echo "Local smoke tag no longer identifies the tested candidate" >&2',
   'exit 1',
+  'if [ "${VALIDATION_ONLY:-false}" = "true" ]; then',
+  'echo "Validation-only: tested candidate will not be published"',
+  'exit 0',
 ]);
 for (const line of shell.split('\n').map((line) => line.trim())) {
   assert(!line || line.startsWith('#') || line === 'set -euo pipefail' ||
@@ -125,16 +128,17 @@ function publish(source, destination) {
   tag(source, destination);
   docker('push', destination);
 }
-function executePush(repository, upstreamTag) {
+function executePush(repository, upstreamTag, validationOnly = '') {
   const derived = `${base}/${repository}`;
   assert.match(upstreamTag, /^(?:latest|2026\.1\.1)$/);
+  assert(['', 'false', 'true'].includes(validationOnly), 'unknown validation-only fixture mode');
   localTags.add(`${derived}:latest`);
   localTags.add(`${derived}:${upstreamTag}`);
   const testedImageId = testedImages.get(`${derived}:smoke`);
   assert.match(testedImageId ?? '', /^sha256:[a-f0-9]{64}$/, 'publication requires a previously exercised immutable image');
-  console.log(`EXECUTE actual Push: DERIVED_IMAGE=${derived} UPSTREAM_TAG=${upstreamTag}`);
+  console.log(`EXECUTE actual Push: DERIVED_IMAGE=${derived} UPSTREAM_TAG=${upstreamTag} VALIDATION_ONLY=${JSON.stringify(validationOnly)}`);
   const output = command(bash, ['--noprofile', '--norc', '-e', '-o', 'pipefail', '-c', pinnedShell], {
-    env: { ...dockerEnv, PUBLICATION_REGRESSION_DOCKER_ENDPOINT: endpoint, DERIVED_IMAGE: derived, UPSTREAM_TAG: upstreamTag, CANDIDATE_IMAGE_ID: testedImageId },
+    env: { ...dockerEnv, PUBLICATION_REGRESSION_DOCKER_ENDPOINT: endpoint, DERIVED_IMAGE: derived, UPSTREAM_TAG: upstreamTag, CANDIDATE_IMAGE_ID: testedImageId, VALIDATION_ONLY: validationOnly },
   });
   console.log(output);
 }
@@ -191,7 +195,7 @@ try {
   check('seed latest identifies prior image', prior.digest, priorReference.digest);
   tag(localImages['busybox:1.37.0'], `${base}/${pinned}:smoke`);
   smoke(`${base}/${pinned}:smoke`);
-  executePush(pinned, '2026.1.1');
+  executePush(pinned, '2026.1.1', 'false');
   const pinnedAfter = await manifest(pinned, '2026.1.1');
   const latestAfter = await manifest(pinned, 'latest');
   console.log(`PINNED before=${JSON.stringify(prior)} selected=${JSON.stringify(pinnedAfter)} latest=${JSON.stringify(latestAfter)}`);
@@ -205,7 +209,7 @@ try {
   const sentinel = await manifest(latest, '2026.1.1');
   tag(localImages['busybox:1.37.0'], `${base}/${latest}:smoke`);
   smoke(`${base}/${latest}:smoke`);
-  executePush(latest, 'latest');
+  executePush(latest, 'latest', 'false');
   const latestFirst = await manifest(latest, 'latest');
   check('latest receives tested smoke content', latestFirst.digest, candidateReference.digest);
   check('latest publication leaves existing pinned digest unchanged', (await manifest(latest, '2026.1.1')).digest, sentinel.digest);
@@ -223,6 +227,25 @@ try {
   check('identical pinned content preserves selected digest', (await manifest(latest, '2026.1.1')).digest, identicalPinned.digest);
   check('identical pinned content preserves latest digest', (await manifest(latest, 'latest')).digest, latestFirst.digest);
   await tags(latest, ['latest', '2026.1.1']);
+
+  // Exercise the actual Push shell with a tested, different candidate. A pinned
+  // request selects an absent tag so an accidental publish also changes tags/list.
+  for (const upstreamTag of ['latest', '2026.1.1']) {
+    const repository = `validation-only-${upstreamTag === 'latest' ? 'latest' : 'pinned'}`;
+    publish(localImages['alpine:3'], `${base}/${repository}:latest`);
+    publish(localImages['alpine:3'], `${base}/${repository}:2025.12.31`);
+    const beforeLatest = await manifest(repository, 'latest');
+    const beforePinned = await manifest(repository, '2025.12.31');
+    const beforeTags = (await registry(`${repository}/tags/list`)).body.tags.sort();
+    assert.equal(beforeLatest.digest, priorReference.digest, 'validation-only latest must start with prior content');
+    assert.notEqual(beforeLatest.digest, candidateReference.digest, 'validation-only candidate must differ from prior latest');
+    tag(localImages['busybox:1.37.0'], `${base}/${repository}:smoke`);
+    smoke(`${base}/${repository}:smoke`);
+    executePush(repository, upstreamTag, 'true');
+    check(`${repository}: validation-only preserves prior latest digest`, (await manifest(repository, 'latest')).digest, beforeLatest.digest);
+    check(`${repository}: validation-only preserves existing pinned digest`, (await manifest(repository, '2025.12.31')).digest, beforePinned.digest);
+    check(`${repository}: validation-only leaves existing tag set unchanged`, (await registry(`${repository}/tags/list`)).body.tags.sort(), beforeTags);
+  }
 } catch (error) {
   results.push({ label: 'setup/execution', passed: false });
   console.error(`ERROR ${error.stack}`);

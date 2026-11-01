@@ -388,6 +388,10 @@ A failed config candidate is a config-migration failure, not a workspace-migrati
 [bootstrap] FATAL: existing OpenClaw config is invalid and is not a supported v2026.8.1 migration shape.
 ```
 
+Before workspace/session import or retired approvals SQLite import, the image prepares supported database schemas through the exact native capabilities bound at image build. Native maintenance ownership and verified `*.pre-startup-migration-*.bak` snapshots cover the entire selected existing database fleet before shared schema 15 and agent schema 19 advance to native targets 20/25. Current schemas are a no-op; schema 0 is accepted only when the native classifier recognizes first-use state. Release labels are provenance, not an unconditional version allowlist: missing or ambiguous native capabilities and changed target-schema classes refuse the build. Automatic preparation refuses unknown schemas, unsafe/aliased database paths, discovery warnings, populated retired security/history tables and custom shared triggers. It never runs broad `doctor --fix`, edits schema manually, or restores raw delivery rows.
+
+Pre-backup workspace inspection uses the native non-observing config reader. Retired approvals are validated and privately backed up first; their native SQLite writer waits for schema preparation. Docker healthchecks remain unhealthy without reading state until the current bootstrap reaches Gateway exec, then run the unchanged native probe as PUID:PGID. The container-local generation marker is published atomically and recovered on restart. An interrupted schema run reuses only the exact verified native full-fleet backup group; even if schemas already committed, it verifies readiness before completing the pending native receipt. A later session-preflight refusal may therefore leave verified SQLite snapshots and schema receipts, while the real config and legacy session sources remain unchanged. On `database-schema: refused code=<category>`, preserve the full backup group and receipts, stop competing writers, and inspect the bounded refusal before retrying. Missing/altered snapshots, changed source identities, subset groups and ambiguous groups are refused, not overwritten. `OPENCLAW_CONFIG_MIGRATION=dry-run` does not run schema preparation.
+
 After config migration and native validation, the image automatically checks only legacy per-agent workspace setup state that the upstream OpenClaw importer recognizes. For every active recognized source, it verifies the byte-exact adjacent `<active-basename>.openclaw-2026.8.1-pre-migration.bak` backup before invoking the upstream workspace-only import, logs `workspace-migration: applied`, then continues bootstrap. If no legacy workspace setup state remains, it emits `workspace-migration: no-op`; a normal restart is idempotent and creates no second workspace backup. A broad `doctor --fix` is neither needed nor run automatically.
 After the existing config migration and validation, and after workspace migration, the image keeps the Gateway stopped and runs OpenClaw's focused all-agent session SQLite import. In the field-tested migration, OpenClaw created a migration manifest and archived the legacy session files only after validation. The import can take several minutes and compacts large existing SQLite databases.
 
@@ -441,6 +445,12 @@ python3 /tmp/merge-template.py \
 ```
 
 The script overlays user-filled values from the stored template onto the upstream xml, writes a `.bak` of the original, and prints any new fields you should review in the Unraid Edit Container UI. Run this before clicking **Edit Container** so your tokens, API keys, and paths survive the upgrade while you pick up new template-level fields.
+
+### Maintainer validation without publishing
+
+In GitHub Actions, open **build-image** → **Run workflow**, select the branch to validate and the desired `upstream_tag`, then enable `validation_only`. This mode builds locally on the Actions runner and runs every existing smoke gate. It skips GHCR login and, after checking the tested candidate identity, exits before creating or pushing publication tags. Existing registry tags, including `latest`, remain unchanged; this run does not deploy an update.
+
+`validation_only` defaults to `false`: ordinary manual runs and automatic push/scheduled runs keep the existing tested-publication behavior. A pinned `upstream_tag` publishes only that tag; `latest` changes only when selected.
 
 ## Troubleshooting
 

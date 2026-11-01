@@ -208,11 +208,11 @@ async function loadRuntime(record) {
   adapterExports.length !== requiredExports.length ||
   adapterExports.some((name, index) => name !== requiredExports[index]) ||
   REQUIRED_ADAPTER_EXPORTS.some((name) => typeof adapter[name] !== "function") ||
-  typeof config.loadConfig !== "function"
+  typeof config.createConfigIO !== "function" || typeof config.loadConfig !== "function"
  ) {
   refuse();
  }
- return { adapter, loadConfig: config.loadConfig };
+ return { adapter, createConfigIO: config.createConfigIO, loadConfig: config.loadConfig };
 }
 
 function resolveRuntimePaths() {
@@ -664,7 +664,7 @@ async function main() {
  await openStableRegularFile(configPath, RUNTIME_ARTIFACT_MAX_BYTES, false);
  if (preflightOnly) process.env.OPENCLAW_CONFIG_PATH = configPath;
  const record = await readRuntimeRecord();
- const { adapter, loadConfig } = await loadRuntime(record);
+ const { adapter, createConfigIO, loadConfig } = await loadRuntime(record);
  await Promise.all([
   assertDirectoryWithoutSymlinks(runtimePaths.home),
   assertDirectoryWithoutSymlinks(runtimePaths.stateDir),
@@ -674,7 +674,15 @@ async function main() {
 
  let cfg;
  try {
-  cfg = loadConfig({ pin: false, skipPluginValidation: true, skipShellEnvFallback: true });
+  if (preflightOnly) {
+   // loadConfig observes runtime state and can migrate old shared schemas.
+   // Source inspection must stay read-only until the schema backup owner runs.
+   const snapshot = await createConfigIO({ env: { ...process.env }, observe: false, pluginValidation: "core-only" }).readConfigFileSnapshot();
+   if (snapshot.valid !== true) refuse();
+   cfg = snapshot.config;
+  } else {
+   cfg = loadConfig({ pin: false, skipPluginValidation: true, skipShellEnvFallback: true });
+  }
  } catch {
   refuse();
  }

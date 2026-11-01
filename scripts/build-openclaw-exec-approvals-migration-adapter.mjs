@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { TextDecoder } from "node:util";
 
 const REQUIRED_EXPORTS = ["detectLegacyExecApprovals", "migrateLegacyExecApprovals"];
+const ADAPTER_EXPORTS = [...REQUIRED_EXPORTS, "isValidLegacyExecApprovalsSource"];
 const ADAPTER_BASENAME = "openclaw-unraid-exec-approvals-migration-adapter.mjs";
 const CHUNK_FILENAME = /^state-migrations\.exec-approvals-[A-Za-z0-9_-]+\.(?:mjs|js)$/;
 const RECORD_VERSION = 1;
@@ -61,9 +62,18 @@ function patchModuleExports(source) {
     parsed.mappings.some((mapping) => mapping.local === name))) {
     throw new BuildContractError("OpenClaw exec approvals module is missing an exact migration function export");
   }
+  if (!hasExactlyOneNamedFunctionDeclaration(source, "normalizeLegacyNullableUsageMetadata") || !/import\s*\{[^}]*\bparseLegacyExecApprovals\b[^}]*\}\s*from/.test(source) || !/const emptyLegacyExecApprovalsSchema\s*=/.test(source)) {
+    throw new BuildContractError("OpenClaw exec approvals source validation contract is unavailable");
+  }
   return [
     `${parsed.body}${parsed.separator}`.trimEnd(),
-    `export { ${REQUIRED_EXPORTS.join(", ")} };`,
+    "function isValidLegacyExecApprovalsSource(raw) {",
+    "  try {",
+    "    if (emptyLegacyExecApprovalsSchema.safeParse(JSON.parse(raw)).success) return true;",
+    "    return parseLegacyExecApprovals(normalizeLegacyNullableUsageMetadata(raw)).ok === true;",
+    "  } catch { return false; }",
+    "}",
+    `export { ${ADAPTER_EXPORTS.join(", ")} };`,
     "",
   ].join("\n");
 }
@@ -126,11 +136,11 @@ async function main() {
   await writeNewFile(adapterPath, adapterSource, 0o644);
   const adapter = await import(moduleUrl(adapterPath));
   const adapterExports = Object.keys(adapter).sort();
-  const requiredExports = [...REQUIRED_EXPORTS].sort();
+  const requiredExports = [...ADAPTER_EXPORTS].sort();
   if (
     adapterExports.length !== requiredExports.length ||
     adapterExports.some((name, index) => name !== requiredExports[index]) ||
-    REQUIRED_EXPORTS.some((name) => typeof adapter[name] !== "function")
+    ADAPTER_EXPORTS.some((name) => typeof adapter[name] !== "function")
   ) {
     throw new BuildContractError("generated exec approvals migration adapter has an unexpected export shape");
   }
