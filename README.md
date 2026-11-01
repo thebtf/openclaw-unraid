@@ -446,6 +446,12 @@ python3 /tmp/merge-template.py \
 
 The script overlays user-filled values from the stored template onto the upstream xml, writes a `.bak` of the original, and prints any new fields you should review in the Unraid Edit Container UI. Run this before clicking **Edit Container** so your tokens, API keys, and paths survive the upgrade while you pick up new template-level fields.
 
+### Maintainer validation without publishing
+
+In GitHub Actions, open **build-image** → **Run workflow**, select the branch to validate and the desired `upstream_tag`, then enable `validation_only`. This mode builds locally on the Actions runner and runs every existing smoke gate. It skips GHCR login and, after checking the tested candidate identity, exits before creating or pushing publication tags. Existing registry tags, including `latest`, remain unchanged; this run does not deploy an update.
+
+`validation_only` defaults to `false`: ordinary manual runs and automatic push/scheduled runs keep the existing tested-publication behavior. A pinned `upstream_tag` publishes only that tag; `latest` changes only when selected.
+
 ## Troubleshooting
 
 ### `origin not allowed (open the Control UI from the gateway host or allow it in gateway.controlUi.allowedOrigins)`

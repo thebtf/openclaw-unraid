@@ -50,6 +50,11 @@ on:
         description: "Upstream openclaw tag to derive from"
         default: "latest"
         required: false
+      validation_only:
+        description: "Run all image gates without publishing"
+        type: boolean
+        default: false
+        required: false
 
 # Share one publication lane across refs, triggers and upstream tags.
 # Queue admission does not guarantee dispatch/start order.
@@ -2693,7 +2698,7 @@ jobs:
           echo "HISTORICAL 2026.9.2 SAME-VOLUME UPGRADE SMOKE OK"
 
       - name: Log in to GHCR
-        if: steps.gate.outputs.build == 'true'
+        if: steps.gate.outputs.build == 'true' && github.event.inputs.validation_only != 'true'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -2706,6 +2711,7 @@ jobs:
         env:
           CANDIDATE_IMAGE_ID: ${{ steps.candidate.outputs.image_id }}
           UPSTREAM_TAG: ${{ steps.tag.outputs.tag }}
+          VALIDATION_ONLY: ${{ github.event.inputs.validation_only || 'false' }}
         run: |
           set -euo pipefail
           if [[ ! "$CANDIDATE_IMAGE_ID" =~ ^sha256:[a-f0-9]{64}$ ]]; then
@@ -2715,6 +2721,10 @@ jobs:
           if [ "$(docker image inspect --format '{{.Id}}' "$DERIVED_IMAGE:smoke")" != "$CANDIDATE_IMAGE_ID" ]; then
             echo "Local smoke tag no longer identifies the tested candidate" >&2
             exit 1
+          fi
+          if [ "${VALIDATION_ONLY:-false}" = "true" ]; then
+            echo "Validation-only: tested candidate will not be published"
+            exit 0
           fi
           docker tag "$CANDIDATE_IMAGE_ID" "$DERIVED_IMAGE:$UPSTREAM_TAG"
           docker push "$DERIVED_IMAGE:$UPSTREAM_TAG"
