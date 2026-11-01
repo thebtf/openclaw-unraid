@@ -7,11 +7,11 @@
 # seeding fought with runtime config ownership (see CHANGELOG v2.0.0).
 # This image bakes the same logic as a proper, reviewable entrypoint script.
 #
-# The upstream image stays untouched underneath: node:24-bookworm-slim,
-# tini as PID 1, gateway code in /app. We only add the Unraid adaptation
-# layer: PUID/PGID remap + one-shot chown + first-boot config seeding,
-# then drop privileges to PUID:PGID and exec the gateway (linuxserver.io
-# init-as-root -> run-as-user model).
+# The upstream image remains the base: node:24-bookworm-slim, tini as PID 1,
+# gateway code in /app. The Unraid layer adds PUID/PGID remap, one-shot chown,
+# first-boot config seeding, and audited build-time compatibility adapters,
+# including the narrowly pinned memory cosine projection repair. Startup drops
+# privileges to PUID:PGID before execing the gateway.
 #
 # Build args:
 #   OPENCLAW_TAG - upstream tag to derive from (default: latest)
@@ -42,6 +42,8 @@ COPY scripts/build-openclaw-exec-approvals-migration-adapter.mjs /usr/local/lib/
 COPY scripts/build-openclaw-default-agent-roles-adapter.mjs /usr/local/lib/build-openclaw-default-agent-roles-adapter.mjs
 COPY scripts/build-openclaw-media-fuse-adapter.mjs /usr/local/lib/build-openclaw-media-fuse-adapter.mjs
 COPY scripts/build-openclaw-schema-migration-adapter.mjs /usr/local/lib/build-openclaw-schema-migration-adapter.mjs
+COPY scripts/build-openclaw-memory-knn-projection.mjs /usr/local/lib/build-openclaw-memory-knn-projection.mjs
+COPY scripts/openclaw-memory-knn-shadow.mjs /usr/local/lib/openclaw-memory-knn-shadow.mjs
 COPY scripts/migrate-openclaw-database-schemas.mjs /usr/local/bin/migrate-openclaw-database-schemas.mjs
 COPY scripts/openclaw-bootstrap-healthcheck.mjs /usr/local/bin/openclaw-bootstrap-healthcheck.mjs
 COPY scripts/migrate-openclaw-legacy-workspaces.mjs /usr/local/bin/migrate-openclaw-legacy-workspaces.mjs
@@ -53,6 +55,7 @@ RUN node /usr/local/lib/build-openclaw-workspace-migration-adapter.mjs /app/dist
   node /usr/local/lib/build-openclaw-default-agent-roles-adapter.mjs /app/dist /usr/local/lib/openclaw-unraid-default-agent-roles.json && \
   node /usr/local/lib/build-openclaw-schema-migration-adapter.mjs /app/dist /usr/local/lib/openclaw-unraid-schema-migration.json && \
   node /usr/local/lib/build-openclaw-media-fuse-adapter.mjs /app /usr/local/lib/openclaw-unraid-media-fuse.json && \
+  node /usr/local/lib/build-openclaw-memory-knn-projection.mjs /app/dist /usr/local/lib/openclaw-unraid-memory-knn-projection.json && \
   chmod 755 /usr/local/bin/unraid-entrypoint.sh /usr/local/bin/migrate-openclaw-2-config.py /usr/local/bin/migrate-openclaw-legacy-workspaces.mjs /usr/local/bin/migrate-openclaw-exec-approvals.mjs /usr/local/bin/materialize-legacy-default-agent-roles.mjs /usr/local/bin/migrate-openclaw-legacy-sessions.mjs
 
 # mcporter: MCP-client CLI consumed by the bundled `mcporter` skill
