@@ -2,20 +2,21 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
+import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
-// 120 s is the upstream model-runtime publication budget, not an override.
-// The local FUSE no-selected-plugin baseline was 10.406 s; selected-plugin
-// startup stalled ~162 s. This generous gate still rejects that failure.
-// Hosted-runner timing is uncalibrated: a control failure is infrastructure/
-// fixture failure, not evidence of production causality or the intended RED.
-const readinessMs = 120_000;
-// Registration is a separate diagnostic observation, never extra time to pass
-// readiness. The unmodified FUSE baseline registered only at ~172.8 s; observe
-// up to 210 s total before classifying missing registration as UNKNOWN.
-const postDeadlineRegistrationMs = 90_000;
+// Availability and startup completion are different contracts. After a real
+// loopback TCP connection, require both two consecutive failed HTTP probes and
+// at least 10 s without a complete response, measured from the first failed
+// probe's start to the current failed probe's end. Any complete response resets
+// that interval; responsive 503 is allowed while startup is still pending.
+const responseTimeoutMs = 10_000;
+const sustainedResponseFailures = 2;
+// This is only a bounded eventual-readiness observation, NOT the upstream
+// internal 120 s publication timeout or a universal startup latency guarantee.
+const readinessMs = 240_000;
 const pluginId = 'synthetic-selected-plugin';
 const gatewayToken = `synthetic-${randomUUID()}`;
 const marker = 'PLUGIN_FUSE_REGISTER ';
@@ -23,11 +24,12 @@ const packageName = index => `synthetic-dep-${String(index).padStart(2, '0')}`;
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const [normalRoot, fuseRoot] = process.argv.slice(2);
 const report = {
-  readinessMs, postDeadlineRegistrationMs, scenarios: [],
+  responseTimeoutMs, sustainedResponseFailures, readinessMs, scenarios: [],
   limits: [
     'Fresh synthetic state; six configured agents are not six retained agent databases or retained-state admission coverage.',
     'Before release, separately run Real FUSE retained-state external plugin entrypoint readiness with synthetic retained databases; this direct-Gateway fixture does not prove that combined path.',
     'Private TMPDIR and XDG_CACHE_HOME are ordinary non-FUSE storage; state and plugin source retain their scenario filesystem.',
+    'Selected-configuration FUSE HTTP unresponsiveness is an availability observation, not proof that the selected plugin caused it; registration may remain unknown on failure.',
   ],
 };
 let active;
@@ -151,7 +153,7 @@ function launch(fixture) {
   const child = spawn(process.execPath, ['/app/dist/index.js', 'gateway', '--bind', 'loopback', '--auth', 'token', '--port', '18789'], {
     cwd: '/app', env: fixture.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const run = { child, output: '', registrations: [], partial: ['', ''] };
+  const run = { child, output: '', registrations: [], runtimeFailures: [], partial: ['', ''] };
   const append = (stream, bytes) => {
     const text = bytes.toString();
     run.output = (run.output + text).slice(-65536);
@@ -164,6 +166,9 @@ function launch(fixture) {
         catch { run.markerError = true; }
       }
       if (/Config invalid|SyntaxError|ERR_MODULE_NOT_FOUND|failed to load plugin|error loading plugin/i.test(line)) run.admissionError = true;
+      if (/prepared model runtime publication[^\r\n]*timed out|prepared model runtime startup degraded|background model runtime publication failed|agent database remains degraded|main-session startup orphan marking failed|state.database[^\r\n]*(?:failed|unavailable)/i.test(line)) {
+        run.runtimeFailures.push(line);
+      }
     }
   };
   child.stdout.on('data', bytes => append(0, bytes));
@@ -203,6 +208,56 @@ async function stop(run) {
   const orderly = graceful && !forced && run.exit?.code === 0 && run.exit.signal === null;
   return { orderly, graceful, forced, exit: run.exit };
 }
+// Fresh connections expose an accepting-but-blocked listener even before its
+// first HTTP success. TCP refusal before first connect remains startup/UNKNOWN.
+function probeGateway(onConnected) {
+  return new Promise(resolve => {
+    const began = performance.now();
+    let connected = false;
+    let settled = false;
+    let responseTimer;
+    let connectTimer;
+    let fixtureError;
+    const finish = sample => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(connectTimer);
+      clearTimeout(responseTimer);
+      resolve({ ...sample, ...(fixtureError ? { fixtureError } : {}), connected, durationMs: Math.round(performance.now() - began) });
+    };
+    const request = http.request({ host: '127.0.0.1', port: 18789, path: '/readyz', method: 'GET', agent: false }, response => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', chunk => {
+        body += chunk;
+        if (body.length > 65536) {
+          fixtureError = 'oversized readiness response';
+          request.destroy(new Error(fixtureError));
+        }
+      });
+      response.once('end', () => finish(response.complete ? { kind: 'response', status: response.statusCode, body } : { kind: 'response-failure', error: 'INCOMPLETE_HTTP_RESPONSE' }));
+      response.once('error', error => finish({ kind: 'response-failure', error: error.code ?? error.message }));
+      response.once('aborted', () => finish({ kind: 'response-failure', error: 'RESPONSE_ABORTED' }));
+    });
+    request.once('socket', socket => {
+      if (!(socket instanceof net.Socket)) {
+        fixtureError = 'expected actual loopback TCP socket';
+        request.destroy(new Error(fixtureError));
+        return;
+      }
+      socket.once('connect', () => {
+        connected = true;
+        clearTimeout(connectTimer);
+        onConnected();
+        // An absolute complete-response deadline, not an idle-socket timeout.
+        responseTimer = setTimeout(() => request.destroy(Object.assign(new Error('complete HTTP response deadline exceeded'), { code: 'HTTP_RESPONSE_TIMEOUT' })), responseTimeoutMs);
+      });
+    });
+    request.once('error', error => finish({ kind: connected ? 'response-failure' : 'connect-failure', error: error.code ?? error.message }));
+    connectTimer = setTimeout(() => request.destroy(Object.assign(new Error('loopback TCP connect deadline exceeded'), { code: 'TCP_CONNECT_TIMEOUT' })), 1000);
+    request.end();
+  });
+}
 async function exercise(fixture) {
   const result = {
     name: fixture.name, selected: fixture.selected,
@@ -210,75 +265,108 @@ async function exercise(fixture) {
     stateFsType: Number(fs.statfsSync(fixture.env.OPENCLAW_STATE_DIR).type),
     tmpFsType: Number(fs.statfsSync(fixture.env.TMPDIR).type),
     cacheFsType: Number(fs.statfsSync(fixture.env.XDG_CACHE_HOME).type),
-    registrations: [], samples: []
+    registrations: [], samples: [], runtimeFailures: []
   };
   report.scenarios.push(result);
   const started = performance.now();
+  const readinessDeadline = started + readinessMs;
   active = launch(fixture);
   let readySamples = 0;
+  let consecutiveFailures = 0;
+  let firstFailedProbeStartedAt;
   let lastSample;
-  while (performance.now() - started < readinessMs) {
+  while (true) {
     assert(!interrupted, 'observer interrupted');
     assert(!active.spawnError, `Gateway spawn failed: ${active.spawnError?.message}`);
-    assert(!active.exit, `Gateway exited before readiness: ${JSON.stringify(active.exit)}`);
+    assert(!active.exit, `Gateway exited during observation: ${JSON.stringify(active.exit)}`);
     assert.equal(requests.length, 0, 'unexpected synthetic provider request');
-    const remaining = readinessMs - (performance.now() - started);
-    let sample;
-    try {
-      const response = await fetch('http://127.0.0.1:18789/readyz', { signal: AbortSignal.timeout(Math.max(1, Math.min(2000, Math.ceil(remaining)))) });
-      const body = await response.text();
-      sample = { status: response.status, body: body.slice(0, 8192) };
-      if (response.status === 200) {
-        const readiness = JSON.parse(body);
+    if (result.availabilityFailure || performance.now() >= readinessDeadline) break;
+    const probeStartedAt = performance.now();
+    const sample = await probeGateway(() => {
+      result.firstTcpConnectedMs ??= Math.round(performance.now() - started);
+    });
+    const probeEndedAt = performance.now();
+    const elapsedMs = Math.round(probeEndedAt - started);
+    const key = JSON.stringify({ ...sample, durationMs: undefined });
+    if (key !== lastSample || sample.kind === 'response') result.samples.push({ probeStartedMs: Math.round(probeStartedAt - started), elapsedMs, ...sample });
+    lastSample = key;
+    assert(!sample.fixtureError, sample.fixtureError);
+    if (sample.kind === 'response') {
+      consecutiveFailures = 0;
+      firstFailedProbeStartedAt = undefined;
+      assert(sample.status === 200 || sample.status === 503, `unexpected readiness HTTP status ${sample.status}`);
+      const readiness = JSON.parse(sample.body);
+      if (readiness.agentDatabases !== undefined) assert(Array.isArray(readiness.agentDatabases), 'invalid agentDatabases readiness list');
+      if (readiness.stateDatabase || readiness.agentDatabases?.some(refusal => refusal.code !== 'agent-database-inspection-pending') ||
+        readiness.failing?.some(reason => reason === 'state-database' || reason === 'internal' || reason.startsWith('agent-database:'))) {
+        result.runtimeFailures.push({ elapsedMs, readiness });
+      }
+      if (sample.status === 200) {
         assert.equal(readiness.ready, true, 'HTTP 200 did not mean ready');
         assert.equal(readiness.coreReady, true, 'Gateway core is not ready');
-        assert.deepEqual(readiness.failing, [], 'Gateway has failing readiness checks');
-        if (readiness.agentDatabases !== undefined) assert(Array.isArray(readiness.agentDatabases), 'invalid agentDatabases readiness list');
-        // Upstream can return HTTP 200 while database inspection is pending.
-        // Keep that response in samples, but never count it as genuine ready.
-        readySamples = readiness.agentDatabases === undefined || readiness.agentDatabases.length === 0 ? readySamples + 1 : 0;
-      } else readySamples = 0;
-    } catch (error) {
-      if (error instanceof assert.AssertionError || error instanceof SyntaxError) throw error;
+        assert.deepEqual(readiness.failing, [], 'HTTP 200 contains failing readiness checks');
+      }
+      const fullyReady = sample.status === 200 && (readiness.agentDatabases === undefined || readiness.agentDatabases.length === 0);
+      readySamples = fullyReady ? readySamples + 1 : 0;
+      if (!result.availabilityFailure && readySamples >= 2 && performance.now() <= readinessDeadline &&
+        (!fixture.selected || active.registrations.length > 0)) {
+        result.readyMs = elapsedMs;
+        break;
+      }
+    } else {
       readySamples = 0;
-      sample = { error: error.cause?.code ?? error.name };
+      if (result.firstTcpConnectedMs !== undefined) {
+        firstFailedProbeStartedAt ??= probeStartedAt;
+        consecutiveFailures++;
+        const noCompleteResponseMs = probeEndedAt - firstFailedProbeStartedAt;
+        if (!result.availabilityFailure && consecutiveFailures >= sustainedResponseFailures && noCompleteResponseMs >= responseTimeoutMs) {
+          result.availabilityFailure = {
+            detectedMs: elapsedMs, consecutiveFailures, lastError: sample.error, responseTimeoutMs,
+            // Monotonic offsets from scenario spawn; retain the failed-probe
+            // interval, not time since startup or the last successful response.
+            noCompleteResponseStartedMs: Math.round(firstFailedProbeStartedAt - started),
+            noCompleteResponseEndedMs: elapsedMs,
+            noCompleteResponseMs: Math.round(noCompleteResponseMs),
+          };
+        }
+      }
     }
-    const elapsedMs = Math.round(performance.now() - started);
-    const key = JSON.stringify(sample);
-    if (key !== lastSample || readySamples > 0) result.samples.push({ elapsedMs, ...sample });
-    lastSample = key;
-    // Two independent reads reject an isolated early success during sidecars.
-    if (readySamples >= 2 && elapsedMs <= readinessMs) { result.readyMs = elapsedMs; break; }
-    await delay(Math.min(1000, Math.max(0, readinessMs - (performance.now() - started))));
+    // Stop on directly observed availability or runtime failure. Registration
+    // is mandatory for PASS, not for reporting an accepting-but-blocked server.
+    if (result.availabilityFailure || active.runtimeFailures.length || active.admissionError || result.runtimeFailures.length) break;
+    await delay(1000);
   }
-  if (!result.readyMs && fixture.name === 'fuse-selected-plugin') {
-    result.readinessDeadlineMissed = true;
-    const registrationDeadline = started + readinessMs + postDeadlineRegistrationMs;
-    while (active.registrations.length === 0 && performance.now() < registrationDeadline) {
-      assert(!interrupted, 'observer interrupted during post-deadline registration observation');
-      assert(!active.spawnError, `Gateway spawn failed: ${active.spawnError?.message}`);
-      assert(!active.exit, `Gateway exited during registration observation: ${JSON.stringify(active.exit)}`);
-      assert(!active.markerError && !active.admissionError, 'plugin admission/registration error');
-      assert.equal(requests.length, 0, 'unexpected synthetic provider request');
-      await delay(Math.min(1000, Math.max(0, registrationDeadline - performance.now())));
-    }
-    result.registrationObservationEndedMs = Math.round(performance.now() - started);
-  }
+  result.observationEndedMs = Math.round(performance.now() - started);
   const registeredBeforeShutdown = active.registrations.length > 0;
   assert(!active.spawnError, `Gateway spawn failed: ${active.spawnError?.message}`);
-  assert(!active.exit, `Gateway exited during readiness observation: ${JSON.stringify(active.exit)}`);
+  assert(!active.exit, `Gateway exited during observation: ${JSON.stringify(active.exit)}`);
+  // Snapshot observations before requesting SIGTERM. Later log messages may
+  // follow from shutdown (or delayed delivery); do not call them prior faults.
+  result.registrations = active.registrations.slice();
+  result.pluginRegistration = fixture.selected ? (registeredBeforeShutdown ? 'OBSERVED_BEFORE_SHUTDOWN' : 'UNKNOWN_BEFORE_SHUTDOWN') : 'NOT_SELECTED';
+  result.runtimeFailures.push(...active.runtimeFailures);
+  if (active.admissionError) result.runtimeFailures.push({ kind: 'plugin-admission-or-configuration-error', observed: 'before-shutdown' });
+  const priorRuntimeFailureCount = active.runtimeFailures.length;
+  const priorRegistrationCount = active.registrations.length;
+  const priorAdmissionError = active.admissionError;
+  const priorMarkerError = active.markerError;
+  result.preShutdownLogTail = active.output;
+  result.shutdownRequestedMs = Math.round(performance.now() - started);
   result.shutdown = await stop(active);
-  result.registrations = active.registrations;
+  result.shutdownObservations = {
+    scope: 'Observed after SIGTERM request; not evidence of a preexisting startup fault or of shutdown causality.',
+    runtimeMessages: active.runtimeFailures.slice(priorRuntimeFailureCount),
+    registrations: active.registrations.slice(priorRegistrationCount),
+    newAdmissionError: !priorAdmissionError && active.admissionError === true,
+    newMalformedMarker: !priorMarkerError && active.markerError === true,
+  };
   result.logTail = active.output;
-  assert(!active.markerError, 'malformed plugin registration marker');
-  assert(!active.admissionError, 'Gateway plugin admission/configuration error');
+  assert(!priorMarkerError, 'malformed plugin registration marker before shutdown');
   active = undefined;
-  if (result.readyMs) assert(result.shutdown.orderly, `ready scenario required non-orderly shutdown: ${JSON.stringify(result.shutdown)}`);
   assert.equal(requests.length, 0, 'unexpected synthetic provider request');
   assert(fs.readFileSync(fixture.configPath).equals(fixture.configBytes), 'Gateway changed original config bytes');
   assert.deepEqual(inventory(fixture.plugin), fixture.source, 'Gateway changed original plugin source bytes/metadata');
   if (fixture.selected) {
-    assert(registeredBeforeShutdown, 'UNKNOWN: selected external plugin registration was not observed before the diagnostic bound/shutdown; not a qualified timing RED');
     for (const registration of result.registrations) {
       assert.equal(registration.id, pluginId);
       assert.equal(registration.dependencies, 528, 'all 32 imported packages must be used');
@@ -287,13 +375,20 @@ async function exercise(fixture) {
       assert.match(registration.source, /^file:\/\//);
     }
   } else assert.equal(result.registrations.length, 0, 'disabled-plugin control executed the plugin');
-  if (!result.readyMs) {
-    if (fixture.name === 'fuse-selected-plugin') {
-      throw Object.assign(new Error(`PLUGIN FUSE READINESS FAIL: selected plugin registered but genuine /readyz was not stable within ${readinessMs}ms; controls passed`), { regression: true });
-    }
-    throw new Error(`control ${fixture.name} did not reach genuine /readyz within ${readinessMs}ms; not a qualified timing RED`);
+  if (result.availabilityFailure) {
+    assert(fixture.name === 'fuse-selected-plugin', `control ${fixture.name} was unresponsive; not a qualified selected-plugin RED`);
+    const registration = registeredBeforeShutdown ? 'observed before shutdown' : 'unknown before shutdown';
+    throw Object.assign(new Error(`PLUGIN FUSE HTTP UNRESPONSIVENESS FAIL: selected configuration on FUSE; plugin registration ${registration}; ${sustainedResponseFailures} or more consecutive failed probes and ${result.availabilityFailure.noCompleteResponseMs}ms without a complete HTTP response after TCP connect; controls passed; cause not established`), { regression: true, failureKind: 'HTTP_UNRESPONSIVENESS_REGRESSION' });
   }
+  if (result.runtimeFailures.length) {
+    assert(fixture.name === 'fuse-selected-plugin', `control ${fixture.name} reported an actual runtime failure; selected-configuration regression not established`);
+    throw Object.assign(new Error(`PLUGIN FUSE GATEWAY RUNTIME FAIL: ${fixture.name} reported actual state/admission/startup-worker failure`), { regression: true, failureKind: 'GATEWAY_RUNTIME_FAILURE' });
+  }
+  if (fixture.selected && !registeredBeforeShutdown) throw Object.assign(new Error('UNKNOWN: selected plugin registration was not observed before shutdown; PASS is not established'), { unknown: true });
+  if (!result.readyMs) throw Object.assign(new Error(`UNKNOWN: ${fixture.name} did not complete genuine readiness within the ${readinessMs}ms observation bound; this is not the internal publication timeout`), { unknown: true });
+  assert(result.shutdown.orderly, `ready scenario required non-orderly shutdown: ${JSON.stringify(result.shutdown)}`);
   delete result.logTail;
+  delete result.preShutdownLogTail;
   console.log(`PLUGIN FUSE CONTROL/CASE OK: ${fixture.name} ready=${result.readyMs}ms`);
 }
 
@@ -323,9 +418,9 @@ try {
   report.status = 'PASS';
 } catch (error) {
   process.exitCode = error.regression ? 1 : 2;
-  report.status = error.regression ? 'READINESS_REGRESSION' : 'INFRA_OR_FIXTURE_ERROR';
+  report.status = error.regression ? error.failureKind : error.unknown ? 'UNVERIFIED' : 'INFRA_OR_FIXTURE_ERROR';
   report.error = error.message;
-  console.error(error.regression ? error.message : `PLUGIN FUSE INFRA ERROR: ${error.stack}`);
+  console.error(error.regression ? error.message : error.unknown ? `PLUGIN FUSE UNVERIFIED: ${error.message}` : `PLUGIN FUSE INFRA ERROR: ${error.stack}`);
 } finally {
   try {
     if (active) report.finalShutdown = await stop(active);

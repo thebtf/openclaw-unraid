@@ -8,7 +8,8 @@ if [ "$#" -ne 1 ]; then
   exit 2
 fi
 fixtures=$(CDPATH= cd -- "$(dirname -- "$0")/fixtures" && pwd)
-context=${DOCKER_CONTEXT:-default}
+requested_host=${DOCKER_HOST:-}
+requested_context=${DOCKER_CONTEXT:-}
 container=
 cleanup() {
   status=$?
@@ -23,15 +24,44 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+docker_clean() (
+  # Preserve context configuration, but never inherit competing daemon routes/TLS.
+  unset DOCKER_HOST DOCKER_CONTEXT DOCKER_TLS DOCKER_TLS_VERIFY DOCKER_CERT_PATH BASH_ENV ENV
+  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker "$@"
+)
 docker_local() {
-  MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*' docker --context "$context" "$@"
+  # Every daemon operation, including cleanup, uses the one validated endpoint.
+  docker_clean --host "$endpoint" "$@"
 }
 infra() { echo "PLUGIN FUSE INFRA ERROR: $*" >&2; exit 2; }
 command -v docker >/dev/null || infra 'missing Docker CLI'
-endpoint=$(docker_local context inspect "$context" --format '{{.Endpoints.docker.Host}}') || infra 'cannot inspect Docker context'
+if [ -n "$requested_host" ] && [ -n "$requested_context" ]; then
+  infra 'ambiguous Docker routing: set only one of DOCKER_HOST or DOCKER_CONTEXT'
+fi
+if [ -n "$requested_host" ]; then
+  endpoint=$requested_host
+else
+  context=$requested_context
+  if [ -z "$context" ]; then
+    context=$(docker_clean context show) || infra 'cannot resolve current Docker context'
+  fi
+  test -n "$context" || infra 'empty Docker context'
+  endpoint=$(docker_clean --context "$context" context inspect "$context" --format '{{.Endpoints.docker.Host}}') || infra 'cannot inspect Docker context'
+fi
+# Reject authorities, remote named pipes, encoded aliases and URI suffixes.
 case "$endpoint" in
-  unix://*|npipe://*) ;;
-  *) infra 'a local Docker socket context is required' ;;
+  *[[:cntrl:]]*|*\\*|*'%'*|*'?'*|*'#'*) infra 'invalid local Docker endpoint URI' ;;
+esac
+case "$endpoint" in
+  unix:///?*)
+    socket_path=${endpoint#unix://}
+    case "$socket_path" in //*) infra 'Unix socket must have an absolute local path without an authority' ;; esac
+    ;;
+  npipe:////./pipe/?*)
+    pipe_name=${endpoint#npipe:////./pipe/}
+    case "$pipe_name" in */*|.|..) infra 'a single local named-pipe name is required' ;; esac
+    ;;
+  *) infra 'only an absolute local Unix socket or npipe:////./pipe/<name> is allowed' ;;
 esac
 image_id=$(docker_local image inspect --format '{{.Id}}' "$1") || infra 'image must already exist locally; no pull is allowed'
 printf '%s\n' "$image_id" | LC_ALL=C grep -Eq '^sha256:[a-f0-9]{64}$' || infra 'invalid image identity'

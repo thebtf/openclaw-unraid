@@ -181,9 +181,11 @@ jobs:
       # This direct-Gateway gate does not cover entrypoint-only adaptations;
       # those require a combined entrypoint/FUSE/plugin proof before release.
       # Missing Docker/FUSE, failed controls and cleanup errors refuse publish.
+      # Separate 10 s HTTP availability probes from bounded eventual readiness;
+      # allow the 15 min observer watchdog plus prerequisite/cleanup headroom.
       - name: Real FUSE external plugin Gateway readiness
         if: steps.gate.outputs.build == 'true'
-        timeout-minutes: 12
+        timeout-minutes: 19
         env:
           PLUGIN_IMAGE_ID: ${{ steps.candidate.outputs.image_id }}
         run: sh scripts/test-plugin-fuse-image.sh "$PLUGIN_IMAGE_ID"
