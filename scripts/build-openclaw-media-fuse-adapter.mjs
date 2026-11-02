@@ -34,6 +34,101 @@ function replaceOnce(source, before, after) {
 }
 async function readJson(file) { return JSON.parse(await fs.readFile(file, 'utf8')); }
 
+function packageIdentity(metadata, name) {
+  return metadata !== null && typeof metadata === 'object' && !Array.isArray(metadata) &&
+    metadata.name === name && typeof metadata.version === 'string' && metadata.version.length <= 128 &&
+    /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?$/.test(metadata.version);
+}
+async function regularImageFile(file) {
+  demand((await fs.lstat(file)).isFile() && await fs.realpath(file) === file, `unsupported image file layout: ${file}`);
+  return fs.readFile(file);
+}
+async function imageTreeSha256(directory) {
+  const entries = [];
+  async function visit(current) {
+    demand(await fs.realpath(current) === current, 'unsupported dependency directory layout');
+    const stat = await fs.lstat(current);
+    entries.push([path.relative(directory, current), stat.mode]);
+    for (const name of (await fs.readdir(current)).sort()) {
+      const file = path.join(current, name);
+      const info = await fs.lstat(file);
+      if (info.isDirectory()) await visit(file);
+      else entries.push([path.relative(directory, file), info.mode, hash(await regularImageFile(file))]);
+    }
+  }
+  await visit(directory);
+  return hash(JSON.stringify(entries));
+}
+
+async function recordUnmodified(app, previous, metadata, callerPath, caller, handoff, publication, recordArgument) {
+  // Classification is not acceptance: the exact image must still pass every
+  // unchanged media FUSE suite and all other publication gates.
+  const manifestPath = path.join(previous, 'package.json');
+  const manifest = await regularImageFile(manifestPath);
+  demand(JSON.stringify(JSON.parse(manifest.toString('utf8'))) === JSON.stringify(metadata), 'fs-safe package metadata changed during classification');
+  const appManifest = await regularImageFile(path.join(app, 'package.json'));
+  const upstream = JSON.parse(appManifest.toString('utf8'));
+  demand(packageIdentity(upstream, 'openclaw'), 'malformed upstream package metadata');
+  demand((await regularImageFile(callerPath)).equals(Buffer.from(caller)), 'guarded media caller changed during classification');
+  const syntaxEnvironment = { ...process.env, NODE_OPTIONS: '' };
+  delete syntaxEnvironment.NODE_V8_COVERAGE;
+  execFileSync(process.execPath, ['--check', callerPath], { stdio: 'pipe', env: syntaxEnvironment });
+  const oldRequire = createRequire(manifestPath);
+  const nativeName = `@openclaw/fs-safe-linux-${process.arch}-gnu`;
+  const nativeEntry = oldRequire.resolve(nativeName);
+  demand(nativeEntry.startsWith(`${app}/node_modules/`), 'native binding is not image-owned');
+  const nativeBytes = await regularImageFile(nativeEntry);
+  let nativeRoot = path.dirname(nativeEntry);
+  let nativeMetadata;
+  let nativeManifest;
+  while (nativeRoot.startsWith(`${app}/node_modules/`)) {
+    try {
+      nativeManifest = await regularImageFile(path.join(nativeRoot, 'package.json'));
+      nativeMetadata = JSON.parse(nativeManifest.toString('utf8'));
+      break;
+    }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    nativeRoot = path.dirname(nativeRoot);
+  }
+  demand(packageIdentity(nativeMetadata, nativeName), 'malformed or missing native package metadata');
+  const packageSha256 = await imageTreeSha256(previous);
+  const nativePackageSha256 = await imageTreeSha256(nativeRoot);
+  const handoffPath = path.join(previous, 'dist/private-producer-handoff.js');
+  const publicationPath = path.join(previous, 'dist/publish-file.js');
+  demand((await regularImageFile(handoffPath)).equals(handoff) &&
+    (await regularImageFile(publicationPath)).equals(publication), 'dependency changed during classification');
+  const nativeModulePath = path.join(previous, 'dist/native.js');
+  await regularImageFile(nativeModulePath);
+  // Never import unknown upstream code or load its native binding in the build.
+  // Syntax checks do not execute initializers, including transitive imports;
+  // the unchanged six-suite gate owns actual private/native ABI acceptance.
+  for (const file of [handoffPath, publicationPath, nativeModulePath]) {
+    execFileSync(process.execPath, ['--check', file], { stdio: 'pipe', env: syntaxEnvironment });
+  }
+  demand(await imageTreeSha256(previous) === packageSha256 &&
+    await imageTreeSha256(nativeRoot) === nativePackageSha256 &&
+    (await regularImageFile(nativeEntry)).equals(nativeBytes) &&
+    (await regularImageFile(path.join(nativeRoot, 'package.json'))).equals(nativeManifest) &&
+    (await regularImageFile(callerPath)).equals(Buffer.from(caller)) &&
+    (await regularImageFile(path.join(app, 'package.json'))).equals(appManifest) &&
+    (await regularImageFile(manifestPath)).equals(manifest), 'source changed during static media classification');
+  const record = {
+    contract: 'openclaw-unraid-media-fuse/1', mode: 'upstream-unmodified', upstreamVersion: upstream.version,
+    classification: 'static-only', acceptance: 'pending-publication-gates',
+    previousVersion: metadata.version, installedVersion: metadata.version, packageRoot: previous, packageSha256, archives: [],
+    native: {
+      name: nativeName, version: nativeMetadata.version, path: nativeEntry, sha256: hash(nativeBytes), packageSha256: nativePackageSha256,
+      requiredCapabilities: ['renameNoReplace', 'linkBeneath', 'removeStagedFile'], abiVerified: false,
+    },
+    handoff: { sourceSha256: hash(handoff), patchedSha256: hash(handoff) },
+    publication: { sourceSha256: hash(publication) },
+    caller: { path: callerPath, sourceSha256: hash(caller), patchedSha256: hash(caller) },
+    builderSha256: hash(await fs.readFile(new URL(import.meta.url))),
+  };
+  await fs.writeFile(recordArgument, `${JSON.stringify(record)}\n`, { flag: 'wx', mode: 0o644 });
+  console.log(JSON.stringify(record));
+}
+
 async function unpack(name, scratch, destination) {
   const url = `https://registry.npmjs.org/@openclaw/${name}/-/${name}-${VERSION}.tgz`;
   const response = await fetch(url, { signal: AbortSignal.timeout(120000) });
@@ -173,15 +268,22 @@ async function main() {
   const previous = await fs.realpath(path.dirname(path.dirname(appRequire.resolve('@openclaw/fs-safe'))));
   demand(previous.startsWith(`${app}/node_modules/`), 'dependency is not image-owned');
   const metadata = await readJson(path.join(previous, 'package.json'));
-  demand(Object.hasOwn(PUBLICATION, metadata.version), `unaudited fs-safe version ${metadata.version}`);
-  demand(hash(await fs.readFile(path.join(previous, 'dist/private-producer-handoff.js'))) === HANDOFF &&
-    hash(await fs.readFile(path.join(previous, 'dist/publish-file.js'))) === PUBLICATION[metadata.version], 'unaudited installed dependency bytes');
+  demand(packageIdentity(metadata, '@openclaw/fs-safe'), 'malformed fs-safe package metadata');
+  const knownDependency = Object.hasOwn(PUBLICATION, metadata.version);
+  const handoff = await fs.readFile(path.join(previous, 'dist/private-producer-handoff.js'));
+  const publication = await fs.readFile(path.join(previous, 'dist/publish-file.js'));
+  // Corruption of an audited version is never an unknown-upstream exemption,
+  // even when its guarded caller has also changed.
+  if (knownDependency) demand(hash(handoff) === HANDOFF && hash(publication) === PUBLICATION[metadata.version], 'unaudited installed dependency bytes');
   const dist = path.join(app, 'dist');
   const callers = (await fs.readdir(dist)).filter(name => /^store\.read-scope-[\w-]+\.mjs$/.test(name));
   demand(callers.length === 1, 'unknown guarded media module layout');
   const callerPath = path.join(dist, callers[0]);
   const caller = await fs.readFile(callerPath, 'utf8');
-  demand(CALLERS.has(hash(caller)), 'unaudited guarded media caller bytes');
+  if (!knownDependency || !CALLERS.has(hash(caller))) {
+    await recordUnmodified(app, previous, metadata, callerPath, caller, handoff, publication, recordArgument);
+    return;
+  }
   const oldRequire = createRequire(path.join(previous, 'package.json'));
   const zipRoot = path.dirname(oldRequire.resolve('jszip/package.json'));
   const install = '/usr/local/lib/openclaw-unraid-fs-safe/node_modules';

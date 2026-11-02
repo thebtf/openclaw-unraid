@@ -24,6 +24,7 @@ on:
       - .gitattributes
       - scripts/build-openclaw-media-fuse-adapter.mjs
       - scripts/test-media-fuse-image.sh
+      - scripts/test-media-upstream-unmodified.sh
       - scripts/fixtures/media-*.mjs
       - scripts/fixtures/run-media-fuse-smoke.sh
       - scripts/test-plugin-fuse-image.sh
@@ -141,6 +142,14 @@ jobs:
           else
             echo "build=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # Exercise classification against the separately pinned audited official
+      # 2026.10.9 image, never the unknown future candidate. This does not replace
+      # any candidate smoke/FUSE gate; prerequisite/assertion/cleanup errors fail.
+      - name: Audited upstream media classification regression
+        if: steps.gate.outputs.build == 'true'
+        timeout-minutes: 15
+        run: sh scripts/test-media-upstream-unmodified.sh
 
       - name: Set up Buildx
         if: steps.gate.outputs.build == 'true'
