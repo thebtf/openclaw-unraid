@@ -50,7 +50,7 @@ on:
       - scripts/fixtures/legacy-default-agent-roles.json
       - .github/workflows/build-image.yml
   schedule:
-    - cron: "23 5 * * *" # daily, off the :00 herd
+    - cron: "23 5,17 * * *" # nominally twice daily, off the :00 herd
   workflow_dispatch:
     inputs:
       upstream_tag:
