@@ -142,7 +142,7 @@ function unmodifiedRecord(fixture) {
   assert.equal(record.builderSha256, sha256(builderBytes), 'record must identify the exact exercised builder');
   if (record.archives !== undefined) assert.deepEqual(record.archives, [], 'unmodified classification must not install archives');
 }
-function run(name, mutate, accept, errorPattern) {
+function run(name, mutate, accept, errorMessage, errorCode) {
   try {
     const fixture = setup(name);
     mutate(fixture);
@@ -163,7 +163,10 @@ function run(name, mutate, accept, errorPattern) {
     } else {
       assert.notEqual(result.status, 0, `${name}: unsafe input must remain fatal`);
       assert.equal(fs.existsSync(fixture.record), false, 'fatal classification must not leave a success record');
-      assert.match(diagnostic, errorPattern, `${name}: refusal must identify the safety boundary, not a harness/network failure`);
+      const stderr = result.stderr ?? '';
+      const expected = typeof errorMessage === 'function' ? errorMessage(fixture) : errorMessage;
+      assert.equal(stderr.split(/\r?\n/, 1)[0], expected, `${name}: first stderr line must identify the expected error, not an incidental stack pathname`);
+      if (errorCode) assert.match(stderr, new RegExp(`^\\s*code: '${errorCode}',?\\r?$`, 'm'), `${name}: expected error code is missing`);
       assert.doesNotMatch(diagnostic, /cannot fetch|fetch failed|ENETUNREACH|ECONNREFUSED|ENOTFOUND|ETIMEDOUT/i);
     }
     results.push({ name, status: 'PASS' });
@@ -197,23 +200,23 @@ try {
   }, true);
   run('unknown-version-missing-caller', fixture => {
     setUnknownVersion(fixture); fs.unlinkSync(fixture.caller);
-  }, false, /guarded media|caller|layout|unaudited fs-safe version/i);
+  }, false, 'Error: media FUSE contract: unknown guarded media module layout; image build refused (audit required)');
   run('unknown-version-ambiguous-callers', fixture => {
     setUnknownVersion(fixture);
     fs.copyFileSync(fixture.caller, path.join(fixture.app, 'dist/store.read-scope-fixture-duplicate.mjs'));
-  }, false, /guarded media|caller|layout|unaudited fs-safe version/i);
+  }, false, 'Error: media FUSE contract: unknown guarded media module layout; image build refused (audit required)');
   run('malformed-package-metadata', fixture => {
     fs.writeFileSync(path.join(fixture.packageRoot, 'package.json'), '{"name":"@openclaw/fs-safe","version":');
-  }, false, /JSON|package config|package\.json|Unexpected|SyntaxError/i);
+  }, false, fixture => `Error: Invalid package config ${path.join(fixture.packageRoot, 'package.json')}.`, 'ERR_INVALID_PACKAGE_CONFIG');
   run('known-version-handoff-corruption-with-unknown-caller', fixture => {
     changeCaller(fixture); corrupt(fixture, 'private-producer-handoff.js');
-  }, false, /unaudited installed dependency bytes/i);
+  }, false, 'Error: media FUSE contract: unaudited installed dependency bytes; image build refused (audit required)');
   run('known-version-publication-corruption-with-unknown-caller', fixture => {
     changeCaller(fixture); corrupt(fixture, 'publish-file.js');
-  }, false, /unaudited installed dependency bytes/i);
+  }, false, 'Error: media FUSE contract: unaudited installed dependency bytes; image build refused (audit required)');
   run('unknown-version-missing-native-binding', fixture => {
     setUnknownVersion(fixture); fs.rmSync(fixture.nativeRoot, { recursive: true });
-  }, false, /native|binding|ABI|helper-unavailable|unaudited fs-safe version/i);
+  }, false, `Error: Cannot find module '${nativeName}'`, 'MODULE_NOT_FOUND');
 } finally {
   try {
     unchanged(sourcePackage, originalPackage);
