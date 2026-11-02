@@ -31,6 +31,7 @@ on:
       - scripts/fixtures/plugin-fuse-readiness-regression.mjs
       - scripts/fixtures/run-plugin-fuse-smoke.sh
       - scripts/fixtures/image-publication-regression.mjs
+      - scripts/fixtures/memory-gateway-*
       - docker/**
       - scripts/migrate-openclaw-2-config.py
       - scripts/build-openclaw-workspace-migration-adapter.mjs
@@ -40,6 +41,8 @@ on:
       - scripts/migrate-openclaw-exec-approvals.mjs
       - scripts/build-openclaw-default-agent-roles-adapter.mjs
       - scripts/materialize-legacy-default-agent-roles.mjs
+      - scripts/build-openclaw-memory-knn-projection.mjs
+      - scripts/openclaw-memory-knn-shadow.mjs
       - scripts/build-openclaw-schema-migration-adapter.mjs
       - scripts/migrate-openclaw-database-schemas.mjs
       - scripts/openclaw-bootstrap-healthcheck.mjs
@@ -2721,6 +2724,14 @@ jobs:
           docker run --rm --network none --user 1000:1000 \
             -v "$upgrade_volume:/home/node/.openclaw" --entrypoint node "$DERIVED_IMAGE:smoke" -e "$delivery_probe_js"
           echo "HISTORICAL 2026.9.2 SAME-VOLUME UPGRADE SMOKE OK"
+
+      # Exercise the actual Gateway consumer before credentials or publication.
+      - name: Built-in Gateway memory search regression
+        if: steps.gate.outputs.build == 'true'
+        timeout-minutes: 15
+        env:
+          MEMORY_IMAGE_ID: ${{ steps.candidate.outputs.image_id }}
+        run: node scripts/fixtures/memory-gateway-regression.mjs "$MEMORY_IMAGE_ID" default
 
       - name: Log in to GHCR
         if: steps.gate.outputs.build == 'true' && github.event.inputs.validation_only != 'true'

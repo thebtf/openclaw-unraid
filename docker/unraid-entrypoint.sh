@@ -36,6 +36,11 @@ set -eu
 # Keep it out of all pre-backup/preflight phases, including container restarts.
 node /usr/local/bin/openclaw-bootstrap-healthcheck.mjs --reset
 
+# Image-owned provenance only: never infer repair coverage from an upstream tag.
+# Reset the healthcheck gate first, even if provenance validation refuses startup.
+node /usr/local/lib/build-openclaw-memory-knn-projection.mjs --runtime-status \
+  /usr/local/lib/openclaw-unraid-memory-knn-projection.json
+
 # --- PUID/PGID resolution (LinuxServer.io convention) ---
 # Defaults: 99/100 = nobody/users on Unraid. Override via template fields.
 PUID="${PUID:-99}"
