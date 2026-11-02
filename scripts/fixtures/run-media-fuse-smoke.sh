@@ -34,7 +34,7 @@ run_node() {
   unshare --net setpriv --reuid=1026 --regid=100 --clear-groups node "$@"
 }
 run_node -e 'const a=require("node:assert/strict"); a.equal(process.getuid(),1026); a.equal(process.getgid(),100);'
-sha256sum "$fixtures/media-fuse-handoff-regression.mjs" "$fixtures/media-store-fuse-smoke.mjs" "$fixtures/media-store-native-mode-smoke.mjs"
+sha256sum "$fixtures/media-fuse-handoff-regression.mjs" "$fixtures/media-store-fuse-smoke.mjs" "$fixtures/media-store-native-mode-smoke.mjs" "$fixtures/media-telegram-fuse-smoke.mjs"
 # The unchanged low-level fixture first calibrates the actual deferred-unlink
 # semantics (including .fuse_hidden and link counts). The real-FUSE consumer
 # refuses a non-FUSE root, so losing mount capability cannot skip this gate.
@@ -43,4 +43,7 @@ run_node "$fixtures/media-fuse-handoff-regression.mjs" --real-fuse-root "$root/m
 run_node "$fixtures/media-store-fuse-smoke.mjs" "$root/mount"
 run_node "$fixtures/media-store-native-mode-smoke.mjs"
 run_node "$fixtures/media-store-native-mode-smoke.mjs" "$root/mount"
-echo 'MEDIA FUSE SMOKE: all five suites passed as 1026:100'
+# The wrapper already disconnected Docker networking. Keep its working loopback
+# for synthetic Bot API HTTP; the fixture requires lo to be the only interface.
+setpriv --reuid=1026 --regid=100 --clear-groups node "$fixtures/media-telegram-fuse-smoke.mjs" "$root/mount"
+echo 'MEDIA FUSE SMOKE: all six suites passed as 1026:100'

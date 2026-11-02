@@ -45,14 +45,15 @@ container=$(docker_local create --pull never --user 0:0 --no-healthcheck \
   "$image_id" -c 'exec sleep infinity')
 docker_local start "$container" >/dev/null
 docker_local exec "$container" mkdir -m 755 /opt/openclaw-media-regression
-for fixture in run-media-fuse-smoke.sh media-fuse-handoff-regression.mjs media-store-fuse-smoke.mjs media-store-native-mode-smoke.mjs; do
+for fixture in run-media-fuse-smoke.sh media-fuse-handoff-regression.mjs media-store-fuse-smoke.mjs media-store-native-mode-smoke.mjs media-telegram-fuse-smoke.mjs; do
   # Stream only these public synthetic test sources, never the whole checkout.
   docker_local exec -i "$container" sh -ceu 'cat > "$1"; chmod 644 "$1"' \
     sh "/opt/openclaw-media-regression/$fixture" < "$fixtures/$fixture"
 done
 # Tools are disposable container additions; /app and its dependency stay intact.
-# This is the only networked preparation; tests run after disconnection as well
-# as inside fresh network namespaces. No production entrypoint or healthcheck runs.
+# This is the only networked preparation; all tests run after disconnection.
+# Five suites also use fresh network namespaces; Telegram uses only loopback.
+# No production entrypoint or healthcheck runs.
 docker_local exec "$container" sh -ceu '
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
