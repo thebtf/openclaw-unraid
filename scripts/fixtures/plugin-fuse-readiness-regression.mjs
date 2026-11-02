@@ -17,6 +17,10 @@ const sustainedResponseFailures = 2;
 // This is only a bounded eventual-readiness observation, NOT the upstream
 // internal 120 s publication timeout or a universal startup latency guarantee.
 const readinessMs = 240_000;
+// A separate reload phase never extends any startup or HTTP-response deadline.
+const reloadMs = 240_000;
+// Full CLI observations are paced separately from the 1 s HTTP sampling loop.
+const healthPollIntervalMs = 10_000;
 const pluginId = 'synthetic-selected-plugin';
 const gatewayToken = `synthetic-${randomUUID()}`;
 const marker = 'PLUGIN_FUSE_REGISTER ';
@@ -24,15 +28,18 @@ const packageName = index => `synthetic-dep-${String(index).padStart(2, '0')}`;
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
 const [normalRoot, fuseRoot] = process.argv.slice(2);
 const report = {
-  responseTimeoutMs, sustainedResponseFailures, readinessMs, scenarios: [],
+  responseTimeoutMs, sustainedResponseFailures, readinessMs, reloadMs, scenarios: [],
   limits: [
     'Fresh synthetic state; six configured agents are not six retained agent databases or retained-state admission coverage.',
     'Before release, separately run Real FUSE retained-state external plugin entrypoint readiness with synthetic retained databases; this direct-Gateway fixture does not prove that combined path.',
     'Private TMPDIR and XDG_CACHE_HOME are ordinary non-FUSE storage; state and plugin source retain their scenario filesystem.',
     'Selected-configuration FUSE HTTP unresponsiveness is an availability observation, not proof that the selected plugin caused it; registration may remain unknown on failure.',
+    'Reload covers one successful selected-plugin generation on FUSE; failed-reload recovery remains a separate scenario.',
+    'Startup also requires public health modelRuntime completion: degraded false, no pending agents and no stage; HTTP 200 alone is not settlement proof.',
   ],
 };
 let active;
+let activeCli;
 let provider;
 let interrupted = false;
 const requests = [];
@@ -165,7 +172,7 @@ function launch(fixture) {
         try { run.registrations.push(JSON.parse(line.slice(index + marker.length).replace(/\u001b\[[0-9;]*m/g, ''))); }
         catch { run.markerError = true; }
       }
-      if (/Config invalid|SyntaxError|ERR_MODULE_NOT_FOUND|failed to load plugin|error loading plugin/i.test(line)) run.admissionError = true;
+      if (/Config invalid|SyntaxError|ERR_MODULE_NOT_FOUND|failed to load plugin|error loading plugin|\[plugins\][^\r\n]*\bfailed during load\b/i.test(line)) run.admissionError = true;
       if (/prepared model runtime publication[^\r\n]*timed out|prepared model runtime startup degraded|background model runtime publication failed|agent database remains degraded|main-session startup orphan marking failed|state.database[^\r\n]*(?:failed|unavailable)/i.test(line)) {
         run.runtimeFailures.push(line);
       }
@@ -207,6 +214,97 @@ async function stop(run) {
   assert(!signalGroup(run, 0), 'Gateway process group remains after shutdown');
   const orderly = graceful && !forced && run.exit?.code === 0 && run.exit.signal === null;
   return { orderly, graceful, forced, exit: run.exit };
+}
+async function stopCli(run) {
+  if (!run) return;
+  clearTimeout(run.timer);
+  // Bound CLI cleanup independently; preserve the Gateway shutdown allowance.
+  if (signalGroup(run, 0)) signalGroup(run, 'SIGTERM');
+  await closeWithin(run, 1000);
+  if (signalGroup(run, 0)) signalGroup(run, 'SIGKILL');
+  assert(await closeWithin(run, 1000), 'local CLI process/stdio did not close');
+  for (let n = 0; n < 10 && signalGroup(run, 0); n++) await delay(50);
+  assert(!signalGroup(run, 0), 'local CLI process group remains after cleanup');
+}
+function launchCli(fixture, args) {
+  const child = spawn(process.execPath, ['/app/dist/index.js', ...args], {
+    cwd: '/app', env: fixture.env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const run = { child, stdout: '', stderr: '' };
+  for (const stream of ['stdout', 'stderr']) child[stream].on('data', bytes => {
+    const text = run[stream] + bytes.toString();
+    if (text.length > 65536) run.outputOverflow = true;
+    run[stream] = text.slice(-65536);
+  });
+  run.closed = new Promise(resolve => {
+    child.once('error', error => { run.spawnError = error; resolve(); });
+    child.once('close', (code, signal) => { run.exit = { code, signal }; resolve(); });
+  });
+  return run;
+}
+function launchPublicationHealth(fixture, publication, started, deadline) {
+  const remainingMs = Math.max(1, Math.floor(deadline - performance.now()));
+  // Public RPC with empty params: inspect health without channel probes. Use
+  // the same synthetic environment/token; keep HTTP observation independent.
+  const args = ['gateway', 'call', 'health', '--json', '--params', '{}', '--timeout', String(remainingMs)];
+  const cli = activeCli = launchCli(fixture, args);
+  cli.observation = { beganMs: Math.round(performance.now() - started), state: 'OBSERVING', args };
+  publication.observations.push(cli.observation);
+  cli.timer = setTimeout(() => {
+    if (cli.exit || cli.spawnError) return;
+    cli.timedOut = true;
+    signalGroup(cli, 'SIGKILL');
+  }, remainingMs);
+  return cli;
+}
+function recordPublicationCli(cli, started) {
+  Object.assign(cli.observation, {
+    elapsedMs: Math.round(performance.now() - started),
+    cli: {
+      pid: cli.child.pid, exit: cli.exit, timedOut: cli.timedOut === true,
+      spawnError: cli.spawnError?.message, stdoutBytes: Buffer.byteLength(cli.stdout),
+      stdout: ['COMPLETE', 'INCOMPLETE', 'DEGRADED'].includes(cli.observation.state) ? undefined : cli.stdout,
+      stderr: cli.stderr
+    },
+  });
+}
+async function collectPublicationHealth(cli, publication, started) {
+  const observation = cli.observation;
+  observation.state = 'OBSERVATION_FAILED';
+  try {
+    assert(!cli.spawnError, `health CLI spawn failed: ${cli.spawnError?.message}`);
+    assert(!cli.outputOverflow, 'health CLI exceeded bounded output capture');
+    if (cli.timedOut) {
+      // This is observer-owned deadline cancellation, not a new Gateway
+      // publication state or evidence that an earlier health reply failed.
+      observation.state = 'CANCELLED_AT_STARTUP_DEADLINE';
+      return;
+    }
+    assert.deepEqual(cli.exit, { code: 0, signal: null }, `health CLI failed: ${cli.stderr}`);
+    observation.state = 'UNSUPPORTED';
+    const response = JSON.parse(cli.stdout);
+    assert(response && typeof response === 'object' && !Array.isArray(response), 'health RPC did not return an object');
+    const status = observation.modelRuntime = response.modelRuntime;
+    assert(status && typeof status === 'object' && !Array.isArray(status), 'health RPC omitted modelRuntime startup status');
+    assert.equal(typeof status.degraded, 'boolean', 'ambiguous modelRuntime degraded status');
+    assert(Array.isArray(status.pendingAgents) && status.pendingAgents.every(id => typeof id === 'string' && id.length > 0), 'ambiguous modelRuntime pendingAgents');
+    assert(Object.keys(status).every(key => ['degraded', 'pendingAgents', 'stage'].includes(key)), 'unsupported modelRuntime startup status fields');
+    const hasStage = Object.hasOwn(status, 'stage');
+    if (hasStage) assert(typeof status.stage === 'string' && status.stage.length > 0, 'ambiguous modelRuntime startup stage');
+    // In the audited owner, update() always has a stage, even with zero pending
+    // agents. Only complete() publishes nondegraded + empty pending + no stage.
+    observation.state = status.degraded ? 'DEGRADED' : hasStage || status.pendingAgents.length ? 'INCOMPLETE' : 'COMPLETE';
+    publication.state = observation.state;
+    if (observation.state === 'COMPLETE') publication.completedMs = Math.round(performance.now() - started);
+  } catch (error) {
+    observation.error = error.message;
+    publication.observationFailure = { state: observation.state, error: observation.error };
+    throw Object.assign(new Error(`UNKNOWN: prepared-model health ${observation.state}: ${error.message}`), { unknown: true });
+  } finally {
+    try { await stopCli(cli); }
+    finally { recordPublicationCli(cli, started); }
+    activeCli = undefined;
+  }
 }
 // Fresh connections expose an accepting-but-blocked listener even before its
 // first HTTP success. TCP refusal before first connect remains startup/UNKNOWN.
@@ -258,6 +356,133 @@ function probeGateway(onConnected) {
     request.end();
   });
 }
+function validateRegistration(registration) {
+  assert.equal(registration.id, pluginId);
+  assert.equal(registration.dependencies, 528, 'all 32 imported packages must be used');
+  assert.equal(registration.uid, 1026);
+  assert.equal(registration.gid, 100);
+  assert.match(registration.source, /^file:\/\//);
+}
+async function exerciseReload(fixture, result) {
+  assert(result.readyMs, 'reload requires genuine startup readiness');
+  assert(active.registrations.length > 0, 'reload requires startup registration');
+  for (const registration of active.registrations) validateRegistration(registration);
+  const started = performance.now();
+  const deadline = started + reloadMs;
+  const gateway = active;
+  const phase = result.reload = {
+    gatewayPidBefore: gateway.child.pid, registrationCountBefore: gateway.registrations.length,
+    samples: [], registrations: [],
+  };
+  const cli = activeCli = launchCli(fixture, ['plugins', 'reload', pluginId, '--json']);
+  // The official non-wait RPC may wait 600 s. Bound this child even while
+  // the observer is awaiting an outstanding 10 s HTTP response.
+  const cliTimer = setTimeout(() => {
+    cli.timedOut = true;
+    signalGroup(cli, 'SIGKILL');
+  }, Math.max(0, deadline - performance.now()));
+  let readySamples = 0;
+  let consecutiveFailures = 0;
+  let firstFailedProbeStartedAt;
+  let lastSample;
+  try {
+    while (true) {
+      assert(!interrupted, 'observer interrupted during reload');
+      if (cli.timedOut) throw Object.assign(new Error(`UNKNOWN: reload CLI exceeded its separate ${reloadMs}ms deadline`), { unknown: true });
+      assert(!cli.spawnError, `reload CLI spawn failed: ${cli.spawnError?.message}`);
+      assert(!cli.outputOverflow, 'reload CLI exceeded bounded output capture');
+      assert.equal(active, gateway, 'reload replaced the observed Gateway');
+      assert.equal(gateway.child.pid, phase.gatewayPidBefore, 'reload changed the Gateway PID');
+      assert(gateway.child.exitCode === null && gateway.child.signalCode === null && !gateway.exit, 'Gateway exited during reload');
+      process.kill(gateway.child.pid, 0);
+      assert(!gateway.markerError, 'malformed plugin registration marker during reload');
+      assert(!gateway.admissionError && gateway.runtimeFailures.length === 0, 'Gateway reported runtime/admission failure during reload');
+      assert.equal(requests.length, 0, 'unexpected synthetic provider request during reload');
+      if (cli.exit) {
+        assert.deepEqual(cli.exit, { code: 0, signal: null }, `reload CLI failed: ${cli.stderr}`);
+        if (!phase.response) {
+          phase.response = JSON.parse(cli.stdout);
+          assert(phase.response && typeof phase.response === 'object' && !Array.isArray(phase.response), 'reload CLI response must be an object');
+          assert(phase.response.runtime && typeof phase.response.runtime === 'object', 'reload CLI omitted structured runtime receipt');
+          const runtime = phase.response.runtime;
+          assert(Number.isSafeInteger(runtime.generation) && runtime.generation >= 0, 'reload CLI omitted a valid runtime generation');
+          assert(runtime.selectedEntries && typeof runtime.selectedEntries === 'object' && !Array.isArray(runtime.selectedEntries), 'reload CLI omitted the selected-entry map');
+          assert(Object.hasOwn(runtime.selectedEntries, pluginId), 'reload CLI omitted the selected plugin entry');
+          assert.equal(typeof runtime.selectedEntries[pluginId], 'string', 'selected plugin entry must be a source path');
+          assert(path.isAbsolute(runtime.selectedEntries[pluginId]), 'selected plugin entry must be an absolute source path');
+          assert(Array.isArray(runtime.pluginIds) && runtime.pluginIds.includes(pluginId), 'reload receipt omitted the affected plugin');
+          assert.notEqual(runtime.restartRequired, true, 'reload receipt requires a restart instead of a live reload');
+          assert.notEqual(phase.response.restartRequired, true, 'reload response requires a restart instead of a live reload');
+        }
+      }
+      if (performance.now() >= deadline) throw Object.assign(new Error(`UNKNOWN: reload did not complete CLI receipt, renewed registration and readiness within its separate ${reloadMs}ms bound`), { unknown: true });
+      const probeStartedAt = performance.now();
+      const sample = await probeGateway(() => { });
+      const probeEndedAt = performance.now();
+      const elapsedMs = Math.round(probeEndedAt - started);
+      const key = JSON.stringify({ ...sample, durationMs: undefined });
+      if (key !== lastSample || sample.kind === 'response') phase.samples.push({ probeStartedMs: Math.round(probeStartedAt - started), elapsedMs, ...sample });
+      lastSample = key;
+      assert(!sample.fixtureError, sample.fixtureError);
+      if (sample.kind === 'response') {
+        consecutiveFailures = 0;
+        firstFailedProbeStartedAt = undefined;
+        assert(sample.status === 200 || sample.status === 503, `unexpected reload readiness HTTP status ${sample.status}`);
+        const readiness = JSON.parse(sample.body);
+        if (readiness.agentDatabases !== undefined) assert(Array.isArray(readiness.agentDatabases), 'invalid post-reload agentDatabases readiness list');
+        assert(!readiness.stateDatabase && !readiness.agentDatabases?.some(refusal => refusal.code !== 'agent-database-inspection-pending') &&
+          !readiness.failing?.some(reason => reason === 'state-database' || reason === 'internal' || reason.startsWith('agent-database:')), 'post-reload readiness reported an actual runtime failure');
+        if (sample.status === 200) {
+          assert.equal(readiness.ready, true, 'post-reload HTTP 200 did not mean ready');
+          assert.equal(readiness.coreReady, true, 'post-reload Gateway core is not ready');
+          assert.deepEqual(readiness.failing, [], 'post-reload HTTP 200 contains failing readiness checks');
+        }
+        // Count only probes started after the complete successful CLI receipt,
+        // not healthy responses sampled while replacement is still in flight.
+        const fullyReady = phase.response && gateway.registrations.length > phase.registrationCountBefore &&
+          sample.status === 200 && (readiness.agentDatabases === undefined || readiness.agentDatabases.length === 0);
+        readySamples = fullyReady ? readySamples + 1 : 0;
+        if (readySamples >= 2 && performance.now() <= deadline) {
+          phase.readyMs = elapsedMs;
+          break;
+        }
+      } else {
+        readySamples = 0;
+        // TCP acceptance was already proved by startup. Refusal now counts too.
+        firstFailedProbeStartedAt ??= probeStartedAt;
+        consecutiveFailures++;
+        const noCompleteResponseMs = probeEndedAt - firstFailedProbeStartedAt;
+        if (consecutiveFailures >= sustainedResponseFailures && noCompleteResponseMs >= responseTimeoutMs) {
+          phase.availabilityFailure = {
+            detectedMs: elapsedMs, consecutiveFailures, lastError: sample.error, responseTimeoutMs,
+            noCompleteResponseStartedMs: Math.round(firstFailedProbeStartedAt - started),
+            noCompleteResponseEndedMs: elapsedMs, noCompleteResponseMs: Math.round(noCompleteResponseMs),
+          };
+          throw new Error('Gateway HTTP unresponsiveness during selected-plugin reload on FUSE; startup controls passed; cause not established');
+        }
+      }
+      await delay(1000);
+    }
+    phase.registrations = gateway.registrations.slice(phase.registrationCountBefore);
+    assert(phase.registrations.length > 0, 'reload did not renew Gateway plugin registration');
+    for (const registration of phase.registrations) validateRegistration(registration);
+    phase.gatewayPidAfter = gateway.child.pid;
+    assert(gateway.child.exitCode === null && gateway.child.signalCode === null && !gateway.exit, 'Gateway exited after reload readiness');
+    process.kill(gateway.child.pid, 0);
+  } catch (error) {
+    phase.error = error.message;
+    if (!error.unknown && !interrupted && !cli.spawnError) Object.assign(error, { regression: true, failureKind: 'PLUGIN_RELOAD_FAILURE' });
+    throw error;
+  } finally {
+    clearTimeout(cliTimer);
+    phase.elapsedMs = Math.round(performance.now() - started);
+    phase.cli = { pid: cli.child.pid, exit: cli.exit, stdout: cli.stdout, stderr: cli.stderr };
+    phase.registrations = gateway.registrations.slice(phase.registrationCountBefore);
+    await stopCli(cli);
+    phase.cli.exit = cli.exit;
+    activeCli = undefined;
+  }
+}
 async function exercise(fixture) {
   const result = {
     name: fixture.name, selected: fixture.selected,
@@ -270,6 +495,10 @@ async function exercise(fixture) {
   report.scenarios.push(result);
   const started = performance.now();
   const readinessDeadline = started + readinessMs;
+  const publication = result.publication = { state: 'NOT_OBSERVED', pollIntervalMs: healthPollIntervalMs, observations: [] };
+  let healthCli;
+  let publicationError;
+  let nextHealthObservationAt = started;
   active = launch(fixture);
   let readySamples = 0;
   let consecutiveFailures = 0;
@@ -280,6 +509,15 @@ async function exercise(fixture) {
     assert(!active.spawnError, `Gateway spawn failed: ${active.spawnError?.message}`);
     assert(!active.exit, `Gateway exited during observation: ${JSON.stringify(active.exit)}`);
     assert.equal(requests.length, 0, 'unexpected synthetic provider request');
+    if (healthCli && (healthCli.exit || healthCli.spawnError || healthCli.timedOut)) {
+      try { await collectPublicationHealth(healthCli, publication, started); }
+      catch (error) {
+        if (!error.unknown) throw error;
+        publicationError = error;
+      }
+      healthCli = undefined;
+      if (publicationError) break;
+    }
     if (result.availabilityFailure || performance.now() >= readinessDeadline) break;
     const probeStartedAt = performance.now();
     const sample = await probeGateway(() => {
@@ -310,8 +548,17 @@ async function exercise(fixture) {
       readySamples = fullyReady ? readySamples + 1 : 0;
       if (!result.availabilityFailure && readySamples >= 2 && performance.now() <= readinessDeadline &&
         (!fixture.selected || active.registrations.length > 0)) {
-        result.readyMs = elapsedMs;
-        break;
+        if (publication.state === 'COMPLETE') {
+          result.readyMs = elapsedMs;
+          break;
+        }
+        const now = performance.now();
+        // Do not churn full CLI processes per HTTP sample or start one in the
+        // last polling window with no useful remaining observation budget.
+        if (!healthCli && now >= nextHealthObservationAt && readinessDeadline - now >= healthPollIntervalMs) {
+          healthCli = launchPublicationHealth(fixture, publication, started, readinessDeadline);
+          nextHealthObservationAt = performance.now() + healthPollIntervalMs;
+        }
       }
     } else {
       readySamples = 0;
@@ -336,10 +583,42 @@ async function exercise(fixture) {
     if (result.availabilityFailure || active.runtimeFailures.length || active.admissionError || result.runtimeFailures.length) break;
     await delay(1000);
   }
+  if (healthCli) {
+    // An earlier availability/runtime failure or the original startup bound
+    // can cancel an in-flight observation; retain it, never call it a success.
+    healthCli.observation.state = 'CANCELLED_BEFORE_STARTUP_EXIT';
+    try { await stopCli(healthCli); }
+    finally { recordPublicationCli(healthCli, started); }
+    activeCli = undefined;
+  }
+  if (!result.readyMs && !publicationError && publication.state === 'DEGRADED') {
+    result.runtimeFailures.push({ kind: 'prepared-model-publication-degraded', observations: publication.observations.length });
+  }
+  if (!result.readyMs && !publicationError) publicationError = Object.assign(new Error(`UNKNOWN: prepared-model publication did not complete within the unchanged ${readinessMs}ms startup bound; last health state ${publication.state}`), { unknown: true });
   result.observationEndedMs = Math.round(performance.now() - started);
-  const registeredBeforeShutdown = active.registrations.length > 0;
+  // Establish startup failures before the reload can change process state.
   assert(!active.spawnError, `Gateway spawn failed: ${active.spawnError?.message}`);
   assert(!active.exit, `Gateway exited during observation: ${JSON.stringify(active.exit)}`);
+  const startupRuntimeFailureCount = result.runtimeFailures.length + active.runtimeFailures.length + (active.admissionError ? 1 : 0);
+  let reloadError;
+  // Both startup controls have already passed. Never reload an unready case,
+  // or let the extra phase hide the original startup failure classification.
+  if (fixture.name === 'fuse-selected-plugin' && result.readyMs && !result.availabilityFailure &&
+    !result.runtimeFailures.length && !active.runtimeFailures.length && !active.admissionError && !active.markerError) {
+    try { await exerciseReload(fixture, result); }
+    catch (error) { reloadError = error; }
+  }
+  const registeredBeforeShutdown = active.registrations.length > 0;
+  // A captured reload failure must survive to classification after evidence,
+  // cleanup and integrity checks; an exited Gateway can be its direct symptom.
+  if (!reloadError) {
+    assert(!active.spawnError, `Gateway spawn failed: ${active.spawnError?.message}`);
+    assert(!active.exit, `Gateway exited during observation: ${JSON.stringify(active.exit)}`);
+  }
+  result.gatewayBeforeShutdown = {
+    pid: active.child.pid, exitCode: active.child.exitCode,
+    signalCode: active.child.signalCode, exit: active.exit ?? null,
+  };
   // Snapshot observations before requesting SIGTERM. Later log messages may
   // follow from shutdown (or delayed delivery); do not call them prior faults.
   result.registrations = active.registrations.slice();
@@ -367,25 +646,24 @@ async function exercise(fixture) {
   assert(fs.readFileSync(fixture.configPath).equals(fixture.configBytes), 'Gateway changed original config bytes');
   assert.deepEqual(inventory(fixture.plugin), fixture.source, 'Gateway changed original plugin source bytes/metadata');
   if (fixture.selected) {
-    for (const registration of result.registrations) {
-      assert.equal(registration.id, pluginId);
-      assert.equal(registration.dependencies, 528, 'all 32 imported packages must be used');
-      assert.equal(registration.uid, 1026);
-      assert.equal(registration.gid, 100);
-      assert.match(registration.source, /^file:\/\//);
-    }
+    for (const registration of result.registrations) validateRegistration(registration);
   } else assert.equal(result.registrations.length, 0, 'disabled-plugin control executed the plugin');
   if (result.availabilityFailure) {
     assert(fixture.name === 'fuse-selected-plugin', `control ${fixture.name} was unresponsive; not a qualified selected-plugin RED`);
     const registration = registeredBeforeShutdown ? 'observed before shutdown' : 'unknown before shutdown';
     throw Object.assign(new Error(`PLUGIN FUSE HTTP UNRESPONSIVENESS FAIL: selected configuration on FUSE; plugin registration ${registration}; ${sustainedResponseFailures} or more consecutive failed probes and ${result.availabilityFailure.noCompleteResponseMs}ms without a complete HTTP response after TCP connect; controls passed; cause not established`), { regression: true, failureKind: 'HTTP_UNRESPONSIVENESS_REGRESSION' });
   }
-  if (result.runtimeFailures.length) {
+  // Startup faults retain precedence. Runtime messages first seen during a
+  // failed reload stay in the evidence without replacing its captured error.
+  if (startupRuntimeFailureCount || (!reloadError && result.runtimeFailures.length)) {
     assert(fixture.name === 'fuse-selected-plugin', `control ${fixture.name} reported an actual runtime failure; selected-configuration regression not established`);
     throw Object.assign(new Error(`PLUGIN FUSE GATEWAY RUNTIME FAIL: ${fixture.name} reported actual state/admission/startup-worker failure`), { regression: true, failureKind: 'GATEWAY_RUNTIME_FAILURE' });
   }
   if (fixture.selected && !registeredBeforeShutdown) throw Object.assign(new Error('UNKNOWN: selected plugin registration was not observed before shutdown; PASS is not established'), { unknown: true });
+  if (publicationError) throw publicationError;
   if (!result.readyMs) throw Object.assign(new Error(`UNKNOWN: ${fixture.name} did not complete genuine readiness within the ${readinessMs}ms observation bound; this is not the internal publication timeout`), { unknown: true });
+  if (reloadError) throw reloadError;
+  if (fixture.name === 'fuse-selected-plugin') assert(result.reload?.readyMs, 'selected FUSE scenario did not complete reload coverage');
   assert(result.shutdown.orderly, `ready scenario required non-orderly shutdown: ${JSON.stringify(result.shutdown)}`);
   delete result.logTail;
   delete result.preShutdownLogTail;
@@ -423,7 +701,8 @@ try {
   console.error(error.regression ? error.message : error.unknown ? `PLUGIN FUSE UNVERIFIED: ${error.message}` : `PLUGIN FUSE INFRA ERROR: ${error.stack}`);
 } finally {
   try {
-    if (active) report.finalShutdown = await stop(active);
+    try { if (activeCli) await stopCli(activeCli); }
+    finally { if (active) report.finalShutdown = await stop(active); }
     if (provider) await new Promise(resolve => { provider.close(resolve); provider.closeAllConnections(); });
     assert.equal(requests.length, 0, 'provider traffic occurred');
     assert(!interrupted, 'observer interrupted');

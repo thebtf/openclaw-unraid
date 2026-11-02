@@ -44,11 +44,13 @@ bindfs --version
 # The Node observer remains outside the Gateway's event loop and process group.
 # Three scenarios: each <=240 s readiness + <=11 s final probe + <=30 s
 # cleanup. Failure classification does not wait for plugin registration.
-# 3*(240+11+30) = 843 s, leaving preparation/observation headroom.
-# Watchdog TERM allows <=11 s outstanding probe plus <=30 s group shutdown
+# Startup remains 3*(240+11+30) = 843 s, with the original headroom.
+# Only the ready FUSE-selected case adds <=240 s reload + <=11 s final
+# probe + <=3 s CLI cleanup. Give that separate phase 300 s, not startup.
+# Watchdog TERM allows <=11 s outstanding probe, <=3 s CLI cleanup and <=30 s group shutdown
 # before KILL; if cleanup still fails, the host wrapper removes its container.
 fixture_status=0
-timeout --signal=TERM --kill-after=45s 900s \
+timeout --signal=TERM --kill-after=45s 1200s \
   setpriv --reuid=1026 --regid=100 --clear-groups \
   node "$fixtures/plugin-fuse-readiness-regression.mjs" "$root/normal" "$root/fuse" || fixture_status=$?
 case "$fixture_status" in
