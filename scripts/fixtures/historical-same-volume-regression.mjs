@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Windows Docker Desktop only. No execution occurs merely on import.
+// Windows Docker Desktop runner; schema-only modes also run in Linux containers.
+// No execution occurs merely on import.
 // Run: node historical-same-volume-regression.mjs sha256:<local-image-id> <new-evidence-directory> --git-bash=<absolute-Git-for-Windows-bash.exe> [--expected-config-id=sha256:<config-id>]
 // Uses the actual workflow importer/entrypoint/oracles. No pulls, tags, builds,
 // automatic removal or force/prune. All resources remain for Main's inspection.
@@ -409,7 +410,164 @@ function main() {
   }
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(runnerPath)) {
+// Schema-only current-cohort phase: never start a Gateway or dispatch outbox work.
+async function currentSchemaCohort(mode) {
+  const { DatabaseSync } = await import('node:sqlite');
+  const { pathToFileURL } = await import('node:url');
+  const state = '/home/node/.openclaw';
+  const files = {
+    state: { file: `${state}/state/openclaw.sqlite`, tables: ['delivery_queue_entries', 'skill_workshop_changes', 'acp_sessions'] },
+    agent: { file: `${state}/agents/main/agent/openclaw-agent.sqlite`, tables: ['session_nodes', 'session_windows', 'transcript_events', 'context_engine_turn_outbox'] },
+  };
+  const artifactIdentity = (file) => {
+    const stat = fs.statSync(file, { bigint: true });
+    return {
+      dev: String(stat.dev), ino: String(stat.ino), mtimeNs: String(stat.mtimeNs),
+      size: Number(stat.size), sha256: sha256(fs.readFileSync(file))
+    };
+  };
+  const snapshot = (file, tables) => {
+    const db = new DatabaseSync(`${pathToFileURL(file).href}?immutable=1`, { readOnly: true });
+    try {
+      assert.equal(db.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
+      assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+      return {
+        version: db.prepare('PRAGMA user_version').get().user_version,
+        rows: Object.fromEntries(tables.map(table => [table, JSON.parse(JSON.stringify(
+          db.prepare(`SELECT rowid AS source_rowid, * FROM "${table}" ORDER BY rowid`).all()))]))
+      };
+    } finally { db.close(); }
+  };
+  const originalArtifacts = () => {
+    const originals = {};
+    for (const name of fs.readdirSync(`${state}/session-sqlite-migration-runs`).filter(name => name.startsWith('session-sqlite-') && name.endsWith('.json'))) {
+      const file = `${state}/session-sqlite-migration-runs/${name}`;
+      originals[file] = artifactIdentity(file);
+      const manifest = JSON.parse(fs.readFileSync(file, 'utf8'));
+      for (const target of manifest.targets) for (const move of target.completedMoves ?? []) originals[move.archivePath] = artifactIdentity(move.archivePath);
+    }
+    assert(Object.keys(originals).length >= 3, 'missing original import receipt/transcript/registry');
+    return originals;
+  };
+  if (mode === '--current-schema-seed') {
+    fs.mkdirSync(`${state}/agents/main/sessions`, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(`${state}/workspace`, { recursive: true, mode: 0o700 });
+    const id = '33333333-3333-4333-8333-333333333333';
+    const timestamp = '2026-10-01T12:00:00.000Z';
+    const sessionKey = 'agent:main:main';
+    const entry = {
+      sessionId: id, updatedAt: Date.parse(timestamp), sessionStartedAt: Date.parse(timestamp),
+      chatType: 'direct', sessionFile: `${state}/agents/main/sessions/${id}.jsonl`
+    };
+    fs.writeFileSync(`${state}/agents/main/sessions/sessions.json`, JSON.stringify({ [sessionKey]: entry }), { flag: 'wx' });
+    const events = [
+      { type: 'session', version: 3, id, timestamp, cwd: `${state}/workspace` },
+      {
+        type: 'message', id: 'current-cohort-user', parentId: null, timestamp,
+        message: { role: 'user', content: [{ type: 'text', text: 'Synthetic current-cohort retained bytes — λ' }], timestamp: Date.parse(timestamp) }
+      },
+    ];
+    fs.writeFileSync(entry.sessionFile, events.map(event => JSON.stringify(event)).join('\n') + '\n', { flag: 'wx' });
+    fs.writeFileSync(`${state}/openclaw.json`, JSON.stringify({
+      gateway: { mode: 'local', auth: { mode: 'token', token: 'synthetic-current-cohort-token' } },
+      agents: { ownership: 'explicit', defaults: { systemAgent: { agentId: 'main' } }, entries: { main: { workspace: `${state}/workspace` } } },
+      plugins: { enabled: false },
+    }), { flag: 'wx' });
+    const imported = spawnSync(process.execPath, ['/app/dist/index.js', 'doctor', '--session-sqlite', 'import', '--session-sqlite-all-agents', '--json'], { encoding: 'utf8', env: process.env });
+    assert.equal(imported.status, 0, `native current-cohort import failed: ${imported.stderr}\n${imported.stdout}`);
+    const shared = new DatabaseSync(files.state.file);
+    const agent = new DatabaseSync(files.agent.file);
+    try {
+      assert.equal(shared.prepare('PRAGMA user_version').get().user_version, 20);
+      assert.equal(agent.prepare('PRAGMA user_version').get().user_version, 25);
+      const payload = JSON.stringify({ state: 'pending', synthetic: 'retained outbox bytes — λ' });
+      for (const rowid of [11, 29]) agent.prepare('INSERT INTO context_engine_turn_outbox(rowid,advancement_key,engine_id,owner_plugin_id,session_id,payload_json,attempt_count,last_attempt_at,last_error,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(rowid, `synthetic-advance-${rowid}`, 'synthetic-offline-engine', 'synthetic-owner', id, payload, rowid, 100, 'synthetic-original-error', 200);
+      for (const rowid of [7, 19]) shared.prepare('INSERT INTO skill_workshop_changes(rowid,change_id,agent_id,skill_name,action,actor,summary,created_at_ms) VALUES(?,?,?,?,?,?,?,?)')
+        .run(rowid, `synthetic-change-${rowid}`, 'main', 'synthetic-skill', 'patch', 'user', 'retained cursor bytes — λ', 200);
+      shared.prepare('INSERT INTO acp_sessions(session_key,session_id,backend,agent,runtime_session_name,identity_json,mode,state,last_activity_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(sessionKey, id, 'synthetic-offline', 'main', 'synthetic-runtime', JSON.stringify({ agentSessionId: '\u00a0 synthetic-agent \t', acpxSessionId: '\n synthetic-acpx \u3000' }), 'persistent', 'idle', 200, 200);
+      const delivery = {
+        id: 'synthetic-retained-delivery', kind: 'message', channel: 'synthetic-offline', to: 'offline-only',
+        payload: { text: 'retained delivery bytes — λ' }, completionRetention: { idPrefix: 'synthetic-', maxAgeMs: 60000, maxEntries: 7 }
+      };
+      shared.prepare('INSERT INTO delivery_queue_entries(queue_name,id,status,entry_kind,channel,target,entry_json,enqueued_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
+        .run('synthetic-current-cohort', delivery.id, 'pending', delivery.kind, delivery.channel, delivery.to, JSON.stringify(delivery), 200, 200);
+      shared.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      agent.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    } finally { shared.close(); agent.close(); }
+    const chown = spawnSync('chown', ['-R', '1000:1000', state], { encoding: 'utf8' });
+    assert.equal(chown.status, 0, chown.stderr);
+    const before = {
+      databases: Object.fromEntries(Object.entries(files).map(([kind, { file, tables }]) =>
+        [kind, { ...snapshot(file, tables), identity: { dev: String(fs.statSync(file).dev), ino: String(fs.statSync(file).ino) } }])), originals: originalArtifacts()
+    };
+    process.stdout.write(JSON.stringify(before));
+    return;
+  }
+  assert.equal(mode, '--current-schema-check');
+  const before = JSON.parse(fs.readFileSync(0, 'utf8'));
+  const contract = JSON.parse(fs.readFileSync('/usr/local/lib/openclaw-unraid-schema-migration.json', 'utf8'));
+  assert([[20, 25], [22, 27]].some(([state, agent]) => contract.stateVersion === state && contract.agentVersion === agent));
+  const migrated = contract.stateVersion === 22;
+  const compare = (actual, expected, label) => {
+    assert.equal(actual.length, expected.length, `${label}: row count`);
+    const columns = expected.length ? Object.keys(expected[0]) : [];
+    assert.deepEqual(actual.map(row => columns.map(column => row[column])), expected.map(row => columns.map(column => row[column])), label);
+  };
+  for (const [kind, { file, tables }] of Object.entries(files)) {
+    const actual = snapshot(file, tables);
+    assert.equal(actual.version, kind === 'state' ? contract.stateVersion : contract.agentVersion);
+    assert.deepEqual({ dev: String(fs.statSync(file).dev), ino: String(fs.statSync(file).ino) }, before.databases[kind].identity, `${kind} database replaced`);
+    assert.equal(fs.statSync(file).uid, 1000);
+    for (const table of tables) compare(actual.rows[table], before.databases[kind].rows[table], `${table}: original rows/columns/rowids`);
+    if (migrated && kind === 'agent') {
+      for (const row of actual.rows.context_engine_turn_outbox) {
+        assert.equal(row.enqueue_sequence, row.source_rowid);
+        assert.equal(row.payload_state, 'pending');
+      }
+      for (const row of actual.rows.session_nodes) assert.equal(row.session_started_at, JSON.parse(row.entry_json).sessionStartedAt);
+    }
+    if (migrated && kind === 'state') {
+      for (const row of actual.rows.skill_workshop_changes) assert.equal(row.cursor_id, row.source_rowid);
+      assert.equal(actual.rows.acp_sessions[0].resume_agent_session_id, 'synthetic-agent');
+      assert.equal(actual.rows.acp_sessions[0].resume_acpx_session_id, 'synthetic-acpx');
+      const delivery = actual.rows.delivery_queue_entries[0];
+      assert.equal(delivery.retention_id_prefix, 'synthetic-');
+      assert.equal(delivery.retention_max_age_ms, 60000);
+      assert.equal(delivery.retention_max_entries, 7);
+    }
+  }
+  assert.deepEqual(originalArtifacts(), before.originals, 'original import receipts/archives changed');
+  const groups = fs.readdirSync(`${state}/session-sqlite-migration-runs`).filter(name => name.startsWith('startup-migration-') && name.endsWith('.json'));
+  assert.equal(groups.length, migrated ? 1 : 0, 'unexpected backup group count or retry-created group');
+  for (const name of groups) {
+    const manifest = JSON.parse(fs.readFileSync(`${state}/session-sqlite-migration-runs/${name}`, 'utf8'));
+    assert.equal(typeof manifest.completedAt, 'string');
+    assert.equal(manifest.targets.length, 2);
+    assert.equal(new Set(manifest.targets.map(target => target.sqlitePath)).size, 2);
+    for (const [kind, { file, tables }] of Object.entries(files)) {
+      const target = manifest.targets.find(target => target.sqlitePath === file);
+      assert(target, 'backup group omitted database');
+      assert.deepEqual(target.databaseIdentity, before.databases[kind].identity);
+      assert.equal(target.validationBeforeArchive, 'passed');
+      assert.equal(target.completedMoves.length, 1);
+      const move = target.completedMoves[0];
+      assert.equal(move.kind, 'database-backup');
+      assert.equal(move.sourcePath, file);
+      assert(move.archivePath.startsWith(`${file}.pre-startup-migration-`) && move.archivePath.endsWith('.bak'));
+      assert.deepEqual(artifactIdentity(move.archivePath), move.artifact.identity, 'verified backup artifact changed');
+      const backup = snapshot(move.archivePath, tables);
+      assert.equal(backup.version, before.databases[kind].version);
+      for (const table of tables) assert.deepEqual(backup.rows[table], before.databases[kind].rows[table], `${table}: original backup rows`);
+    }
+  }
+  console.log('CURRENT-COHORT SAME-VOLUME SCHEMA OK: original rows/identities/import artifacts preserved; projections/cursors/outbox sequence and whole-fleet backups verified; no Gateway dispatch');
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(runnerPath) && ['--current-schema-seed', '--current-schema-check'].includes(process.argv[2])) {
+  currentSchemaCohort(process.argv[2]).catch(error => { console.error(error); process.exitCode = 1; });
+} else if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(runnerPath)) {
   try {
     if (process.argv[2] === '--docker-proxy') {
       assert(process.argv[3], 'missing run directory');

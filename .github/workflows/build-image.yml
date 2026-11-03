@@ -2725,6 +2725,43 @@ jobs:
             -v "$upgrade_volume:/home/node/.openclaw" --entrypoint node "$DERIVED_IMAGE:smoke" -e "$delivery_probe_js"
           echo "HISTORICAL 2026.9.2 SAME-VOLUME UPGRADE SMOKE OK"
 
+      # Exercise native schema-only maintenance before any Gateway can consume
+      # the populated current-cohort turn outbox; retain the older 15/19 gate.
+      - name: Current-cohort same-volume schema migration smoke
+        if: steps.gate.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          seed_image=ghcr.io/openclaw/openclaw@sha256:1a2a3ce113e435039dbeac5ae261759bb4759908563d91c81059e896b38c5d98
+          schema_volume=smoke-current-cohort-state
+          schema_seed=smoke-current-cohort-seed
+          schema_candidate=smoke-current-cohort-candidate
+          cleanup() {
+            docker rm -f "$schema_seed" "$schema_candidate" >/dev/null 2>&1 || true
+            docker volume rm "$schema_volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker pull "$seed_image"
+          docker volume create "$schema_volume" >/dev/null
+          schema_env=(-e HOME=/home/node -e OPENCLAW_HOME=/home/node
+            -e OPENCLAW_STATE_DIR=/home/node/.openclaw
+            -e OPENCLAW_CONFIG_DIR=/home/node/.openclaw
+            -e OPENCLAW_CONFIG_PATH=/home/node/.openclaw/openclaw.json
+            -e OPENCLAW_WORKSPACE_DIR=/home/node/.openclaw/workspace)
+          docker run -d --name "$schema_seed" --network none --user 0:0 \
+            -v "$schema_volume:/home/node/.openclaw" "${schema_env[@]}" \
+            --entrypoint sh "$seed_image" -c 'sleep infinity'
+          docker cp scripts/fixtures/historical-same-volume-regression.mjs "$schema_seed:/tmp/schema-cohort.mjs"
+          before=$(docker exec "$schema_seed" node /tmp/schema-cohort.mjs --current-schema-seed)
+          docker stop "$schema_seed" >/dev/null
+          docker run -d --name "$schema_candidate" --network none --user 0:0 \
+            -v "$schema_volume:/home/node/.openclaw" "${schema_env[@]}" \
+            --entrypoint sh "$DERIVED_IMAGE:smoke" -c 'sleep infinity'
+          docker cp scripts/fixtures/historical-same-volume-regression.mjs "$schema_candidate:/tmp/schema-cohort.mjs"
+          docker exec --user 1000:1000 "$schema_candidate" node /usr/local/bin/migrate-openclaw-database-schemas.mjs
+          printf '%s' "$before" | docker exec -i --user 1000:1000 "$schema_candidate" node /tmp/schema-cohort.mjs --current-schema-check
+          test "$(docker exec --user 1000:1000 "$schema_candidate" node /usr/local/bin/migrate-openclaw-database-schemas.mjs)" = 'database-schema: no-op'
+          printf '%s' "$before" | docker exec -i --user 1000:1000 "$schema_candidate" node /tmp/schema-cohort.mjs --current-schema-check
+
       # Exercise the actual Gateway consumer before credentials or publication.
       - name: Built-in Gateway memory search regression
         if: steps.gate.outputs.build == 'true'

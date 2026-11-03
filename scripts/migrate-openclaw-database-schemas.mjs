@@ -27,7 +27,7 @@ async function regularFile(file) {
 async function loadAdapter() {
   await regularFile(RECORD);
   const record = JSON.parse(await fs.readFile(RECORD, "utf8"));
-  if (record.version !== 2 || typeof record.openClawVersion !== "string" || !record.openClawVersion.trim() || record.stateVersion !== 20 || record.agentVersion !== 25 || record.packagePath !== "/app/package.json" || !/^[a-f0-9]{64}$/.test(record.packageSha256) || record.adapterPath !== "/app/dist/openclaw-unraid-schema-migration-adapter.mjs" || !Array.isArray(record.modules) || record.modules.length !== 10) refuse("image-contract");
+  if (record.version !== 2 || typeof record.openClawVersion !== "string" || !record.openClawVersion.trim() || ![[20, 25], [22, 27]].some(([state, agent]) => record.stateVersion === state && record.agentVersion === agent) || record.packagePath !== "/app/package.json" || !/^[a-f0-9]{64}$/.test(record.packageSha256) || record.adapterPath !== "/app/dist/openclaw-unraid-schema-migration-adapter.mjs" || !Array.isArray(record.modules) || record.modules.length !== 10) refuse("image-contract");
   await regularFile(record.packagePath);
   const packageBytes = await fs.readFile(record.packagePath);
   if (digest(packageBytes) !== record.packageSha256 || JSON.parse(packageBytes).version !== record.openClawVersion) refuse("image-contract");
@@ -38,17 +38,19 @@ async function loadAdapter() {
   }
   const adapter = await import(pathToFileURL(record.adapterPath).href);
   if (REQUIRED.some((name) => typeof adapter[name] !== "function")) refuse("image-contract");
-  return adapter;
+  return { ...adapter, stateVersion: record.stateVersion, agentVersion: record.agentVersion };
 }
 
 function requireClean(result, phase) {
   if (!result || !Array.isArray(result.changes) || !Array.isArray(result.warnings) || result.warnings.length) refuse(phase);
 }
 
-function checkPreflight(result) {
+function checkPreflight(result, { stateVersion, agentVersion }) {
+  const stateSources = stateVersion === 22 ? [0, 15, 20] : [0, 15];
+  const agentSources = agentVersion === 27 ? [19, 25] : [19];
   if (!result || !Array.isArray(result.incompatible) || !Array.isArray(result.indeterminate) || result.incompatible.length || result.indeterminate.length || result.agentRefusals?.length) refuse("schema-preflight");
   const pending = result.pendingMigrations ?? [];
-  if (!Array.isArray(pending) || pending.some((row) => row.kind === "state" ? row.path !== SHARED || ![0, 15].includes(row.foundVersion) || row.supportedVersion !== 20 : row.kind !== "agent" || row.foundVersion !== 19 || row.supportedVersion !== 25 || typeof row.agentId !== "string")) refuse("unsupported-schema");
+  if (!Array.isArray(pending) || pending.some((row) => row.kind === "state" ? row.path !== SHARED || !stateSources.includes(row.foundVersion) || row.supportedVersion !== stateVersion : row.kind !== "agent" || !agentSources.includes(row.foundVersion) || row.supportedVersion !== agentVersion || typeof row.agentId !== "string")) refuse("unsupported-schema");
   const prepared = result.agentDatabaseMigrationDiscovery;
   if (result.agentDatabaseRecoveryConfigValid !== true || !prepared || prepared.stateDir !== ROOT) refuse("configuration");
   const discovery = prepared.discovery;
@@ -142,7 +144,7 @@ async function main() {
   if (process.env.HOME !== "/home/node" || process.env.OPENCLAW_STATE_DIR !== ROOT) refuse("runtime-paths");
   await regularFile(process.env.OPENCLAW_CONFIG_PATH);
   const api = await loadAdapter();
-  const first = checkPreflight(await api.prepareDoctorDatabasePreflight({ preserveSourceArtifacts: true }));
+  const first = checkPreflight(await api.prepareDoctorDatabasePreflight({ preserveSourceArtifacts: true }), api);
   const initialReceipts = await incompleteDatabaseReceipts(api);
   if (!first.pending.length && !initialReceipts.length) return "database-schema: no-op";
   if (first.pending.length === 1 && first.pending[0].kind === "state" && first.pending[0].foundVersion === 0 && !first.targets.length) {
@@ -172,7 +174,7 @@ async function main() {
     await owner.run(async () => {
       phase = "owned-preflight";
       await assertInventory(originalInventory);
-      const before = checkPreflight(await api.prepareDoctorDatabasePreflight({ preserveSourceArtifacts: true }));
+      const before = checkPreflight(await api.prepareDoctorDatabasePreflight({ preserveSourceArtifacts: true }), api);
       const currentInventory = await inventory(before.targets);
       if (JSON.stringify(currentInventory) !== JSON.stringify(originalInventory)) refuse("changed-fleet");
       const previousGroup = await matchingBackupGroup(api, await incompleteDatabaseReceipts(api), originalInventory);
@@ -207,7 +209,7 @@ async function main() {
       });
       phase = "whole-fleet-readiness";
       await assertInventory(originalInventory);
-      const after = checkPreflight(await api.prepareDoctorDatabasePreflight({ preserveSourceArtifacts: true }));
+      const after = checkPreflight(await api.prepareDoctorDatabasePreflight({ preserveSourceArtifacts: true }), api);
       if (after.pending.length) refuse("incomplete-schema");
       if (JSON.stringify(await inventory(after.targets)) !== JSON.stringify(originalInventory)) refuse("changed-fleet");
       const ready = await api.preflightOpenClawDatabaseSchemas({ env: process.env, verifyCurrentSchemaShape: true, preserveSourceArtifacts: true, configuredAgentDatabaseTargets: after.targets });

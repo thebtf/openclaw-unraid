@@ -53,7 +53,7 @@ async function main() {
       const defaults = [...candidate.source.matchAll(/const\s+supportedVersions\s*=\s*options\.supportedVersions\s*\?\?\s*\{\s*state:\s*(\d+)\s*,\s*agent:\s*(\d+)\s*,?\s*\}\s*;/g)];
       if (defaults.length !== 1) throw Error("native target-schema contract unavailable");
       nativeSchema = { stateVersion: Number(defaults[0][1]), agentVersion: Number(defaults[0][2]) };
-      if (nativeSchema.stateVersion !== 20 || nativeSchema.agentVersion !== 25) throw Error("unsupported native target-schema class");
+      if (![[20, 25], [22, 27]].some(([state, agent]) => nativeSchema.stateVersion === state && nativeSchema.agentVersion === agent)) throw Error("unsupported native target-schema class");
     }
     modules.push({ path: candidate.sourcePath, sha256: candidate.sha256 });
     exports.push(`export { ${candidate.selected.map(({ local, exported }) => `${exported} as ${local}`).join(", ")} } from ${JSON.stringify(`./${path.basename(candidate.sourcePath)}`)};`);
