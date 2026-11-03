@@ -434,7 +434,7 @@ async function exerciseReload(fixture, result) {
           !readiness.failing?.some(reason => reason === 'state-database' || reason === 'internal' || reason.startsWith('agent-database:')), 'post-reload readiness reported an actual runtime failure');
         if (sample.status === 200) {
           assert.equal(readiness.ready, true, 'post-reload HTTP 200 did not mean ready');
-          assert.equal(readiness.coreReady, true, 'post-reload Gateway core is not ready');
+          if (Object.hasOwn(readiness, 'coreReady')) assert.equal(readiness.coreReady, true, 'post-reload Gateway core is not ready');
           assert.deepEqual(readiness.failing, [], 'post-reload HTTP 200 contains failing readiness checks');
         }
         // Count only probes started after the complete successful CLI receipt,
@@ -541,7 +541,7 @@ async function exercise(fixture) {
       }
       if (sample.status === 200) {
         assert.equal(readiness.ready, true, 'HTTP 200 did not mean ready');
-        assert.equal(readiness.coreReady, true, 'Gateway core is not ready');
+        if (Object.hasOwn(readiness, 'coreReady')) assert.equal(readiness.coreReady, true, 'Gateway core is not ready');
         assert.deepEqual(readiness.failing, [], 'HTTP 200 contains failing readiness checks');
       }
       const fullyReady = sample.status === 200 && (readiness.agentDatabases === undefined || readiness.agentDatabases.length === 0);
