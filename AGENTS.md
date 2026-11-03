@@ -12,6 +12,8 @@ Do not patch OpenClaw's private bundles, replace its dependencies, optimize its 
 
 Before adopting an upstream image change, and periodically while this image follows upstream, inspect the actual release/image changes that can affect this wrapper: base image and architecture, `USER`/entrypoint/command, UID/GID and permissions, persistent paths, configuration/environment contracts, logging, and documented state-upgrade requirements. Record the upstream version/digest, downstream source/build identity and installed image separately; an inherited OCI label is not proof of our source revision.
 
+Managed plugins installed in persistent state do not automatically follow a rebuilt base image. Check their installed versions and declared OpenClaw compatibility separately; do not blindly install the current npm `latest` into an older running core. An older plugin version is not itself proof of incompatibility or the incident's cause.
+
 Use `Dockerfile`, `docker/unraid-entrypoint.sh`, `openclaw.xml`, `docker-compose.yml` and `.github/workflows/build-image.yml` as the maintained implementation owners. Read the affected portions before changing their behavior. Keep version-specific findings, incidents and current results out of this file.
 
 The existing image workflow owns upstream-digest tracking, candidate validation and publication. Investigate a failed update at its first concrete failure. Do not bypass an unsafe update check, but do not invent an expanding test framework or private-API compatibility project either. A new synthetic failure is not automatically the cause of the real Unraid incident.
